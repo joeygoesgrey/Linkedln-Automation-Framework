@@ -10,7 +10,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
@@ -568,63 +568,8 @@ class MentionService:
                 pass
 
         # Fallback: click best textual match
-        item_selectors = MentionSelectors.FALLBACK_SUGGESTIONS
-        for sel in item_selectors:
-            try:
-                items = self.ui.driver.find_elements(By.XPATH, sel)
-
-                def score(el: WebElement) -> int:
-                    """Rank one suggestion by how well its text matches the name.
-
-                    WHY
-                      A higher score puts the closest person first, so the click
-                      lands on the intended mention.
-
-                    Args
-                      el: WebElement, one suggestion from the tray.
-
-                    Returns
-                      int, 3 for an exact match, 2 for a prefix, 1 for a
-                      substring, and 0 otherwise or on error.
-                    """
-                    try:
-                        t = (el.text or "").strip().lower()
-                        exp = (expected_name or "").strip().lower()
-                        if not exp:
-                            return 0
-                        if t == exp:
-                            return 3
-                        if t.startswith(exp):
-                            return 2
-                        if exp in t:
-                            return 1
-                        return 0
-                    except WebDriverException:
-                        return 0
-
-                ranked = sorted(items, key=score, reverse=True) if items else []
-                for el in ranked or items:
-                    if not el.is_displayed():
-                        continue
-                    try:
-                        self.ui.driver.execute_script(
-                            "arguments[0].scrollIntoView({block: 'center'});", el
-                        )
-                    except WebDriverException:
-                        pass
-                    try:
-                        el.click()
-                        self.ui.pause(0.2, 0.5)
-                        return True
-                    except WebDriverException:
-                        try:
-                            self.ui.driver.execute_script("arguments[0].click();", el)
-                            self.ui.pause(0.2, 0.5)
-                            return True
-                        except WebDriverException:
-                            continue
-            except WebDriverException:
-                continue
+        if self._click_best_text_match(expected_name):
+            return True
 
         # Keyboard fallback: press DOWN + ENTER to accept the first suggestion.
         # Bypasses CSS selectors entirely — uses LinkedIn's native keyboard nav.
@@ -639,3 +584,88 @@ class MentionService:
             logger.info(f"MENTIONS_SELECT keyboard_fallback failed: {e.msg}")
 
         return False
+
+    def _click_best_text_match(self, expected_name: Optional[str] = None) -> bool:
+        """Find the suggestion whose text best matches the expected name.
+
+        WHY
+          Keep the textual matching logic out of _select_first_mention_suggestion
+          so it stays under the 60-line ceiling.
+
+        Args
+          expected_name: Optional[str], the name to match against, or None.
+
+        Returns
+          bool, True when a click landed, False otherwise.
+        """
+        for sel in MentionSelectors.FALLBACK_SUGGESTIONS:
+            try:
+                items = self.ui.driver.find_elements(By.XPATH, sel)
+            except WebDriverException:
+                continue
+
+            scores = self._score_mention_match(items, expected_name)
+            ranked = sorted(
+                items, key=lambda el: scores.get(id(el), 0), reverse=True
+            ) if items else []
+            for el in ranked or items:
+                try:
+                    if not el.is_displayed():
+                        continue
+                except WebDriverException:
+                    continue
+                try:
+                    self.ui.driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center'});", el
+                    )
+                except WebDriverException:
+                    pass
+                try:
+                    el.click()
+                    self.ui.pause(0.2, 0.5)
+                    return True
+                except WebDriverException:
+                    try:
+                        self.ui.driver.execute_script("arguments[0].click();", el)
+                        self.ui.pause(0.2, 0.5)
+                        return True
+                    except WebDriverException:
+                        continue
+        return False
+
+    @staticmethod
+    def _score_mention_match(
+        items: List[WebElement], expected_name: Optional[str]
+    ) -> Dict[int, int]:
+        """Score each suggestion by text match quality.
+
+        WHY
+          A standalone method is simpler than a closure inside a loop and can be
+          tested independently.
+
+        Args
+          items: List[WebElement], the suggestion elements.
+          expected_name: Optional[str], the name to match against.
+
+        Returns
+          Dict[int, int], mapping id(el) to score: 3 for exact, 2 for prefix,
+          1 for substring, 0 otherwise.
+        """
+        exp = (expected_name or "").strip().lower()
+        if not exp:
+            return {}
+        scores: Dict[int, int] = {}
+        for el in items:
+            try:
+                t = (el.text or "").strip().lower()
+            except WebDriverException:
+                continue
+            if t == exp:
+                scores[id(el)] = 3
+            elif t.startswith(exp):
+                scores[id(el)] = 2
+            elif exp in t:
+                scores[id(el)] = 1
+            else:
+                scores[id(el)] = 0
+        return scores
