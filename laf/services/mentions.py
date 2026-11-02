@@ -153,6 +153,125 @@ class MentionService:
                 return False
         return True
 
+    def _type_mention_name(self, post_area: WebElement, name: str) -> None:
+        """Type @name character by character into the editor.
+
+        WHY
+          Keep the character-by-character typing loop out of the mention
+          insertion method so it stays under the 60-line ceiling.
+
+        Args
+          post_area: WebElement, the editor to type into.
+          name: str, the display name to type.
+
+        MUTATIONS
+          Types text into the editor.
+        """
+        safe_name = self.sanitize_bmp(name)
+        for ch in safe_name:
+            post_area.send_keys(ch)
+            self.ui.pause(self.config.min_typing_delay, self.config.max_typing_delay)
+
+    def _nudge_and_select_mention(self, post_area: WebElement, name: str) -> None:
+        """Nudge the editor, wait for suggestions, select one and verify.
+
+        WHY
+          Keep the suggestion wait, selection and verification out of the
+          mention insertion method so it stays under the 60-line ceiling.
+
+        Args
+          post_area: WebElement, the editor to type into.
+          name: str, the display name to match.
+
+        MUTATIONS
+          Clicks a suggestion and types trailing space.
+        """
+        safe_name = self.sanitize_bmp(name)
+        try:
+            logger.info("MENTIONS_NUDGE space+backspace applied")
+            post_area.send_keys(" ")
+            self.ui.pause(0.1, 0.25)
+            post_area.send_keys(Keys.BACKSPACE)
+        except WebDriverException:
+            pass
+        try:
+            if self.config.capture_typeahead_html:
+                self._capture_typeahead_snapshot(name)
+        except WebDriverException:
+            pass
+        self.ui.pause(1.5, 2.5)
+        self._wait_for_mention_suggestions(name, timeout=8)
+
+        selected = self._select_first_mention_suggestion(
+            post_area, expected_name=None, prefer_first=True
+        )
+        if not selected:
+            selected = self._select_first_mention_suggestion(
+                post_area, expected_name=safe_name, prefer_first=False
+            )
+        logger.info(f"MENTIONS_SELECT prefer_first={'yes'} selected={bool(selected)}")
+
+        self.verify_mention_entity(post_area, name, timeout=4)
+        try:
+            post_area.send_keys(" ")
+        except WebDriverException:
+            pass
+        try:
+            self._cleanup_trailing_newline(post_area)
+        except WebDriverException:
+            pass
+
+    def _insert_one_mention(self, post_area: WebElement, name: str, leading_space: bool) -> None:
+        """Type one name into the editor and select it from the mention popover.
+
+        WHY
+          Keep the per-name typing, waiting and selection logic out of the
+          parent method so it stays under the 60-line ceiling.
+
+        Args
+          post_area: WebElement, the editor to type into.
+          name: str, the display name to mention.
+          leading_space: bool, whether to add a space before the @.
+
+        MUTATIONS
+          Types text and clicks a suggestion in the typeahead popover.
+        """
+        try:
+            need_space = True
+            try:
+                last_char = (
+                    self.ui.driver.execute_script(
+                        "return (arguments[0].innerText||'').slice(-1);",
+                        post_area,
+                    )
+                    or ""
+                )
+                need_space = leading_space or (
+                    not last_char
+                    or (isinstance(last_char, str) and not last_char.isspace())
+                )
+            except WebDriverException:
+                need_space = True
+            if need_space:
+                try:
+                    post_area.send_keys(" ")
+                    self.ui.pause(
+                        self.config.min_typing_delay, self.config.max_typing_delay
+                    )
+                except WebDriverException:
+                    pass
+            post_area.send_keys("@")
+            self.ui.pause(0.2, 0.5)
+            try:
+                if self.config.capture_typeahead_html:
+                    self._capture_typeahead_snapshot(name)
+            except WebDriverException:
+                pass
+            self._type_mention_name(post_area, name)
+            self._nudge_and_select_mention(post_area, name)
+        except WebDriverException as e:
+            logger.info(f"Mention insertion fallback for '{name}': {e.msg}")
+
     def insert_mentions(
         self,
         post_area: WebElement,
@@ -209,84 +328,7 @@ class MentionService:
             pass
 
         for name in names:
-            try:
-                # Ensure separation before '@' so tray appears reliably
-                need_space = True
-                try:
-                    last_char = (
-                        self.ui.driver.execute_script(
-                            "return (arguments[0].innerText||'').slice(-1);",
-                            post_area,
-                        )
-                        or ""
-                    )
-                    need_space = leading_space or (
-                        not last_char or (isinstance(last_char, str) and not last_char.isspace())
-                    )
-                except WebDriverException:
-                    need_space = True
-                if need_space:
-                    try:
-                        post_area.send_keys(" ")
-                        self.ui.pause(
-                            self.config.min_typing_delay, self.config.max_typing_delay
-                        )
-                    except WebDriverException:
-                        pass
-                post_area.send_keys("@")
-                self.ui.pause(0.2, 0.5)
-                try:
-                    if self.config.capture_typeahead_html:
-                        self._capture_typeahead_snapshot(name)
-                except WebDriverException:
-                    pass
-                safe_name = self.sanitize_bmp(name)
-                for ch in safe_name:
-                    post_area.send_keys(ch)
-                    self.ui.pause(self.config.min_typing_delay, self.config.max_typing_delay)
-                # Nudge the editor to reliably trigger LinkedIn's typeahead:
-                # add a space, then backspace to return caret to the name end
-                try:
-                    logger.info("MENTIONS_NUDGE space+backspace applied")
-                    post_area.send_keys(" ")
-                    self.ui.pause(0.1, 0.25)
-                    post_area.send_keys(Keys.BACKSPACE)
-                except WebDriverException:
-                    pass
-                try:
-                    if self.config.capture_typeahead_html:
-                        self._capture_typeahead_snapshot(name)
-                except WebDriverException:
-                    pass
-                # Give the suggestions tray more time to populate
-                self.ui.pause(1.5, 2.5)
-                self._wait_for_mention_suggestions(name, timeout=8)
-
-                # Selection strategy: prefer the first visible suggestion after a short wait
-                # (per requested behavior). Fallback to best textual match if needed.
-                selected = self._select_first_mention_suggestion(
-                    post_area, expected_name=None, prefer_first=True
-                )
-                if not selected:
-                    selected = self._select_first_mention_suggestion(
-                        post_area, expected_name=safe_name, prefer_first=False
-                    )
-                logger.info(f"MENTIONS_SELECT prefer_first={'yes'} selected={bool(selected)}")
-
-                # Verify mention entity; do not try again to avoid duplicates
-                self.verify_mention_entity(post_area, name, timeout=4)
-                # Always add a trailing space after the mention so the next word doesn't stick
-                try:
-                    post_area.send_keys(" ")
-                except WebDriverException:
-                    pass
-
-                try:
-                    self._cleanup_trailing_newline(post_area)
-                except WebDriverException:
-                    pass
-            except WebDriverException as e:
-                logger.info(f"Mention insertion fallback for '{name}': {e.msg}")
+            self._insert_one_mention(post_area, name, leading_space)
 
     def _cleanup_trailing_newline(self, post_area: WebElement, attempts: int = 2) -> None:
         """Remove a trailing newline that a mention selection left behind.
