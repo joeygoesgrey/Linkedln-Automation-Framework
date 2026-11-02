@@ -77,6 +77,59 @@ class ProfileService:
         self.config = config
         self.engage_dom = engage_dom
 
+    def _navigate_to_search_results(self, name: str) -> Optional[List[Any]]:
+        """Navigate to LinkedIn people search and return the result elements.
+
+        WHY
+          Keep the navigation and element wait out of search_profile so the
+          parent method only decides which profile to pick.
+
+        Args
+          name: str, the person's name to search for.
+
+        Returns
+          Optional[List[Any]], the profile elements, or None when the search
+          page does not load or no results appear.
+        """
+        try:
+            encoded_name = urllib.parse.quote(name)
+            search_url = f"https://www.linkedin.com/search/results/people/?keywords={encoded_name}"
+            self.ui.driver.get(search_url)
+            time.sleep(3)
+
+            elements = WebDriverWait(self.ui.driver, 15).until(
+                EC.presence_of_all_elements_located((By.XPATH, ProfileSelectors.SEARCH_RESULTS))
+            )
+            logger.info(f"Found {len(elements)} profile elements")
+            return elements
+        except WebDriverException as e:
+            logger.error(f"Error finding profile elements: {e.msg}")
+            self.ui.driver.save_screenshot("search_error.png")
+            return None
+
+    def _first_profile_without_keywords(self, profiles: List[Any]) -> Optional[str]:
+        """Return the profile URL of the first element that has one.
+
+        WHY
+          Keep the simple 'pick first valid' search out of search_profile so
+          the parent method only contains the keyword-matching loop.
+
+        Args
+          profiles: List[Any], the profile element list from the search page.
+
+        Returns
+          Optional[str], the first found profile URL, or None.
+        """
+        for profile in profiles:
+            try:
+                link = profile.find_element(By.XPATH, ProfileSelectors.PROFILE_LINK)
+                href = link.get_attribute("href")
+                if href:
+                    return href
+            except WebDriverException:
+                continue
+        return None
+
     def search_profile(
         self, name: str, bio_keywords: Optional[List[str]] = None
     ) -> Optional[str]:
@@ -99,82 +152,34 @@ class ProfileService:
           Navigates the browser, and saves search_error.png when the results
           cannot be read.
         """
-        try:
-            logger.info(f"Searching for profile: {name}")
-            logger.info(
-                f"[Stage: Pre-Search] Current browser URL: {self.ui.driver.current_url}"
-            )
 
-            # Use direct URL navigation to bypass brittle search UI changes
-            encoded_name = urllib.parse.quote(name)
-            search_url = f"https://www.linkedin.com/search/results/people/?keywords={encoded_name}"
-            self.ui.driver.get(search_url)
-            time.sleep(3)
-
-            logger.info(
-                f"[Stage: Post-Search Load] Current browser URL: {self.ui.driver.current_url}"
-            )
-
-            try:
-                profile_elements = WebDriverWait(self.ui.driver, 15).until(
-                    EC.presence_of_all_elements_located((By.XPATH, ProfileSelectors.SEARCH_RESULTS))
-                )
-                logger.info(f"Found {len(profile_elements)} profile elements")
-
-                if not profile_elements:
-                    logger.warning("No profile elements found")
-                    return None
-
-                if not bio_keywords:
-                    for profile in profile_elements:
-                        try:
-                            link = profile.find_element(By.XPATH, ProfileSelectors.PROFILE_LINK)
-                            href = link.get_attribute("href")
-                            if href:
-                                return href
-                        except WebDriverException:
-                            continue
-                    logger.warning("None of the profile elements contained a valid profile link.")
-                    return None
-
-                normalized_keywords = [kw.lower() for kw in bio_keywords if kw]
-
-                for idx, profile in enumerate(profile_elements, 1):
-                    try:
-                        profile_text = (profile.text or "").lower()
-                        logger.debug(f"Profile {idx} text sample: {profile_text[:120]}...")
-
-                        if any(keyword in profile_text for keyword in normalized_keywords):
-                            logger.info(
-                                "Match found in profile %d based on bio keywords.",
-                                idx,
-                            )
-                            link = profile.find_element(By.XPATH, ProfileSelectors.PROFILE_LINK)
-                            return link.get_attribute("href")
-                    except WebDriverException as err:
-                        logger.debug(f"Error processing profile {idx}: {err.msg}")
-                        continue
-
-                logger.info("No matching bio found, returning first valid result")
-                for profile in profile_elements:
-                    try:
-                        link = profile.find_element(By.XPATH, ProfileSelectors.PROFILE_LINK)
-                        href = link.get_attribute("href")
-                        if href:
-                            return href
-                    except WebDriverException:
-                        continue
-                return None
-
-            except WebDriverException as find_err:
-                logger.error(f"Error finding profile elements: {find_err.msg}")
-                self.ui.driver.save_screenshot("search_error.png")
-                logger.info("Screenshot saved as search_error.png")
-                return None
-
-        except WebDriverException as e:
-            logger.error(f"Error in search_profile: {e.msg}", exc_info=True)
+        profile_elements = self._navigate_to_search_results(name)
+        if not profile_elements:
             return None
+
+        if not bio_keywords:
+            return self._first_profile_without_keywords(profile_elements)
+
+        normalized_keywords = [kw.lower() for kw in bio_keywords if kw]
+
+        for idx, profile in enumerate(profile_elements, 1):
+            try:
+                profile_text = (profile.text or "").lower()
+                logger.debug(f"Profile {idx} text sample: {profile_text[:120]}...")
+
+                if any(keyword in profile_text for keyword in normalized_keywords):
+                    logger.info(
+                        "Match found in profile %d based on bio keywords.",
+                        idx,
+                    )
+                    link = profile.find_element(By.XPATH, ProfileSelectors.PROFILE_LINK)
+                    return link.get_attribute("href")
+            except WebDriverException as err:
+                logger.debug(f"Error processing profile {idx}: {err.msg}")
+                continue
+
+        logger.info("No matching bio found, returning first valid result")
+        return self._first_profile_without_keywords(profile_elements)
 
     def follow_profile(self) -> bool:
         """Follow the open profile unless it is already followed.

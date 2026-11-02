@@ -13,4 +13,3 @@ laf/services/mentions.py::insert_mentions
 laf/services/mentions.py::_capture_typeahead_snapshot
 laf/services/mentions.py::_select_first_mention_suggestion
 laf/services/overlays.py::dismiss_overlays
-laf/services/profile_actions.py::search_profile
