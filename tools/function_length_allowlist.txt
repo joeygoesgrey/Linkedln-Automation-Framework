@@ -1,4 +1,3 @@
 # Functions still over the 60 code line ceiling, waiting to be split.
 # The check fails on a new offender and on a stale entry, so this list can
 # only shrink. Remove the line when you split the function.
-laf/services/media.py::_find_file_input

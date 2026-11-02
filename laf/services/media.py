@@ -181,6 +181,223 @@ class MediaService:
         logger.error("Could not find any photo upload button in composer")
         return None
 
+    def _find_media_modal(self) -> Optional[WebElement]:
+        """Find the media upload modal root element.
+
+        WHY
+          Keep the modal discovery out of the file input search for modularity.
+
+        Returns
+          Optional[WebElement], the modal element, or None.
+        """
+        for root in MediaSelectors.MODAL_ROOTS:
+            try:
+                return WebDriverWait(self.ui.driver, self.config.element_timeout).until(
+                    EC.presence_of_element_located((By.XPATH, root))
+                )
+            except WebDriverException:
+                continue
+        return None
+
+    def _find_by_selectors(self, modal, selectors, by) -> Optional[WebElement]:
+        """Try each selector and return the first visible file input.
+
+        WHY
+          Keep the selector iteration out of each fallback method.
+
+        Returns
+          Optional[WebElement], the unhidden input, or None.
+        """
+        for selector in selectors:
+            try:
+                if modal is not None and selector.startswith("//"):
+                    el = modal.find_element(By.XPATH, "." + selector[1:])
+                else:
+                    el = WebDriverWait(self.ui.driver, self.config.short_timeout).until(
+                        EC.presence_of_element_located((by, selector))
+                    )
+                self._unhide_element(el)
+                logger.info(f"Found file input with selector: {selector}")
+                return el
+            except WebDriverException:
+                continue
+        return None
+
+    def _unhide_element(self, el) -> None:
+        """Remove hidden styles from an element via JavaScript.
+
+        WHY
+          Selenium cannot interact with visually-hidden elements, so make
+          them accessible before use.
+
+        MUTATIONS
+          Modifies the element's CSS classes and inline styles.
+        """
+        css = 'display:block!important;visibility:visible!important;'
+        css += 'opacity:1!important;position:static!important;width:1px;height:1px'
+        try:
+            self.ui.driver.execute_script(
+                'arguments[0].classList.remove("visually-hidden");'
+                'arguments[0].disabled=false;'
+                "arguments[0].style.cssText='" + css + "';",
+                el,
+            )
+        except WebDriverException:
+            pass
+
+    def _find_file_input_by_label(self, modal) -> Optional[WebElement]:
+        """Resolve a file input via its 'Upload from computer' label.
+
+        Returns
+          Optional[WebElement], the input, or None.
+        """
+        try:
+            label = None
+            if modal is not None:
+                try:
+                    label = modal.find_element(By.XPATH, MediaSelectors.UPLOAD_LABEL)
+                except WebDriverException:
+                    pass
+            if not label:
+                label = self.ui.driver.find_element(By.XPATH, MediaSelectors.UPLOAD_LABEL)
+            input_id = label.get_attribute("for")
+            if not input_id:
+                return None
+            xp = f"//input[@id='{input_id}']"
+            candidate = (
+                modal.find_element(By.XPATH, "." + xp[1:]) if modal else
+                self.ui.driver.find_element(By.XPATH, xp)
+            )
+            self._unhide_element(candidate)
+            return candidate
+        except WebDriverException:
+            return None
+
+    def _reveal_and_find_via_js(self, selectors) -> Optional[WebElement]:
+        """Use JavaScript to reveal hidden file inputs, then retry selectors.
+
+        Returns
+          Optional[WebElement], the first found input, or None.
+        """
+        vis_css = 'display:block!important;visibility:visible!important;'
+        vis_css += 'opacity:1!important;position:static!important;'
+        js = (
+            'var fi=document.getElementById('
+            + '"media-editor-file-selector__file-input");'
+            'if(!fi){'
+            'var all=Array.from(document.querySelectorAll('
+            + "'input[type=\\\"file\\\"]'));"
+            'all.forEach(function(inp){'
+            "inp.style.cssText='" + vis_css + "';"
+            'inp.disabled=false;'
+            'inp.classList.remove("visually-hidden");'
+            'var p=inp.parentElement;'
+            'for(var i=0;i<5&&p;i++){'
+            "p.style.cssText='" + vis_css + "';"
+            'p=p.parentElement;}});'
+            'fi=all[0];}else{'
+            "fi.style.cssText='" + vis_css + "';"
+            'fi.classList.remove("visually-hidden");'
+            'fi.disabled=false;}'
+            'return!!fi;'
+        )
+        try:
+            self.ui.driver.execute_script(js)
+            for selector in selectors:
+                try:
+                    by = By.CSS_SELECTOR if not selector.startswith("//") else By.XPATH
+                    fi = WebDriverWait(self.ui.driver, self.config.short_timeout).until(
+                        EC.presence_of_element_located((by, selector))
+                    )
+                    return fi
+                except WebDriverException:
+                    continue
+        except WebDriverException:
+            pass
+        return None
+
+    def _find_in_shadow_roots(self) -> Optional[WebElement]:
+        """Deep-search shadow roots for file inputs.
+
+        Returns
+          Optional[WebElement], a suitable input, or None.
+        """
+        js = (
+            'var r=[],s=new Set();'
+            'function w(n){if(!n||s.has(n))return;s.add(n);'
+            "if(n.querySelectorAll)n.querySelectorAll('input[type=file]')"
+            + '.forEach(function(e){r.push(e);});'
+            'var c=(n.children?Array.from(n.children):[]);'
+            'for(var i=0;i<c.length;i++)w(c[i]);'
+            'if(n.shadowRoot)w(n.shadowRoot);}'
+            'w(document);return r;'
+        )
+        try:
+            inputs = self.ui.driver.execute_script(js) or []
+            for idx, candidate in enumerate(inputs):
+                try:
+                    acc = (candidate.get_attribute("accept") or "").lower()
+                    if ("image" in acc) or (not acc):
+                        self._unhide_element(candidate)
+                        return candidate
+                except WebDriverException:
+                    continue
+        except WebDriverException:
+            pass
+        return None
+
+    def _find_in_iframes(self) -> Optional[WebElement]:
+        """Search each iframe for a file input.
+
+        Returns
+          Optional[WebElement], the first found input, or None.
+        """
+        try:
+            frames = self.ui.driver.find_elements(By.TAG_NAME, "iframe")
+            for i, frame in enumerate(frames):
+                try:
+                    self.ui.driver.switch_to.frame(frame)
+                    for selector in MediaSelectors.IFRAME_INPUTS:
+                        try:
+                            by = By.CSS_SELECTOR if not selector.startswith("//") else By.XPATH
+                            fi = WebDriverWait(self.ui.driver, 2).until(
+                                EC.presence_of_element_located((by, selector))
+                            )
+                            self._unhide_element(fi)
+                            return fi
+                        except WebDriverException:
+                            continue
+                except WebDriverException:
+                    pass
+                finally:
+                    try:
+                        self.ui.driver.switch_to.default_content()
+                    except WebDriverException:
+                        pass
+        except WebDriverException:
+            pass
+        return None
+
+    def _create_new_file_input(self) -> Optional[WebElement]:
+        """Create a new file input element as a last resort.
+
+        Returns
+          Optional[WebElement], the newly created input, or None.
+        """
+        js = """
+            const n = document.createElement('input');
+            n.type = 'file'; n.id = 'linkedin-bot-file-input';
+            n.style.cssText = 'position:fixed;top:0;left:0;display:block!important;z-index:9999;';
+            document.body.appendChild(n); return true;
+        """
+        try:
+            self.ui.driver.execute_script(js)
+            return WebDriverWait(self.ui.driver, self.config.short_timeout).until(
+                EC.presence_of_element_located((By.ID, "linkedin-bot-file-input"))
+            )
+        except WebDriverException:
+            return None
+
     def _find_file_input(self) -> Optional[WebElement]:
         """Find, reveal or create the file input used by the media uploader.
 
@@ -197,224 +414,30 @@ class MediaService:
           appends a new file input to the page.
         """
         logger.info("Finding file input element...")
-        modal_roots = MediaSelectors.MODAL_ROOTS
-        modal = None
-        for root in modal_roots:
-            try:
-                modal = WebDriverWait(self.ui.driver, self.config.element_timeout).until(
-                    EC.presence_of_element_located((By.XPATH, root))
-                )
-                break
-            except WebDriverException:
-                logger.debug(f"Modal root not found: {root}")
-                continue
+        modal = self._find_media_modal()
         file_input_selectors = MediaSelectors.FILE_INPUTS
-        for selector in file_input_selectors:
-            selector_type = By.CSS_SELECTOR if not selector.startswith("//") else By.XPATH
-            try:
-                logger.info(f"Trying file input selector: {selector}")
-                if modal is not None and selector.startswith("//"):
-                    candidate = modal.find_element(By.XPATH, "." + selector[1:])
-                else:
-                    candidate = WebDriverWait(self.ui.driver, self.config.short_timeout).until(
-                        EC.presence_of_element_located((selector_type, selector))
-                    )
-                try:
-                    self.ui.driver.execute_script(
-                        "arguments[0].classList.remove('visually-hidden'); "
-                        "arguments[0].disabled=false; "
-                        "arguments[0].style.cssText='display:block!important;"
-                        "visibility:visible!important;opacity:1!important;"
-                        "position:static!important;width:1px;height:1px';",
-                        candidate,
-                    )
-                except WebDriverException:
-                    logger.debug("Could not unhide the located file input")
-                logger.info(f"Found file input element with selector: {selector}")
-                return candidate
-            except WebDriverException as e:
-                logger.info(f"File input selector {selector} failed: {e.msg}")
-        try:
-            logger.info("Trying to resolve file input via label 'Upload from computer'")
-            label = None
-            if modal is not None:
-                try:
-                    label = modal.find_element(By.XPATH, MediaSelectors.UPLOAD_LABEL)
-                except WebDriverException:
-                    logger.debug("Upload label not found inside the modal")
-                    label = None
-            if not label:
-                label = self.ui.driver.find_element(By.XPATH, MediaSelectors.UPLOAD_LABEL)
-            input_id = label.get_attribute("for")
-            if input_id:
-                by_id_xpath = f"//input[@id='{input_id}']"
-                logger.info(f"Resolved input id via label: {input_id}")
-                if modal is not None:
-                    candidate = modal.find_element(By.XPATH, "." + by_id_xpath[1:])
-                else:
-                    candidate = self.ui.driver.find_element(By.XPATH, by_id_xpath)
-                try:
-                    self.ui.driver.execute_script(
-                        "arguments[0].classList.remove('visually-hidden'); "
-                        "arguments[0].disabled=false; "
-                        "arguments[0].style.cssText='display:block!important;"
-                        "visibility:visible!important;opacity:1!important;"
-                        "position:static!important;width:1px;height:1px';",
-                        candidate,
-                    )
-                except WebDriverException:
-                    logger.debug("Could not unhide the file input resolved via label")
-                return candidate
-        except WebDriverException as e:
-            logger.info(f"Label resolution failed: {e.msg}")
-        logger.info("Trying JavaScript to reveal hidden file input...")
-        try:
-            js_to_reveal_file_inputs = (
-                """
-            let fileInput = document.getElementById('media-editor-file-selector__file-input');
-            if (!fileInput) {
-                const fileInputs = Array.from(document.querySelectorAll('input[type="file"]'));
-                fileInputs.forEach(input => {
-                    input.style.cssText = 'display: block !important; """
-                "visibility: visible !important; opacity: 1 !important; "
-                "position: static !important;';\n"
-                """                    input.disabled = false;
-                    input.classList.remove('visually-hidden');
-                    let parent = input.parentElement;
-                    for (let i = 0; i < 5 && parent; i++) {
-                        parent.style.cssText = 'display: block !important; """
-                "visibility: visible !important; opacity: 1 !important;';\n"
-                """                        parent = parent.parentElement;
-                    }
-                });
-                fileInput = fileInputs[0];
-            } else {
-                fileInput.style.cssText = 'display: block !important; """
-                "visibility: visible !important; opacity: 1 !important; "
-                "position: static !important;';\n"
-                """                fileInput.classList.remove('visually-hidden');
-                fileInput.disabled = false;
-            }
-            return fileInput ? true : false;
-            """
-            )
-            self.ui.driver.execute_script(js_to_reveal_file_inputs)
-            logger.info("JavaScript executed to reveal hidden file inputs")
-            for selector in file_input_selectors:
-                selector_type = By.CSS_SELECTOR if not selector.startswith("//") else By.XPATH
-                try:
-                    logger.info(f"Trying file input selector after JS reveal: {selector}")
-                    file_input = WebDriverWait(self.ui.driver, self.config.short_timeout).until(
-                        EC.presence_of_element_located((selector_type, selector))
-                    )
-                    logger.info(
-                        f"Found file input element after JS reveal with selector: {selector}"
-                    )
-                    return file_input
-                except WebDriverException:
-                    logger.debug(f"File input not found after JS reveal: {selector}")
-                    continue
-            logger.info("No file input found after JavaScript reveal")
-        except WebDriverException as e:
-            logger.warning(f"Error executing JavaScript to reveal file inputs: {e.msg}")
-        try:
-            logger.info("Searching shadow roots for file inputs")
-            deep_search_js = """
-                const results = [];
-                const seen = new Set();
-                function walk(node){
-                  if(!node || seen.has(node)) return;
-                  seen.add(node);
-                  if (node.querySelectorAll) {
-                    node.querySelectorAll('input[type="file"]').forEach(el => results.push(el));
-                  }
-                  const children = node.children ? Array.from(node.children) : [];
-                  for (const child of children) { walk(child); }
-                  if (node.shadowRoot) { walk(node.shadowRoot); }
-                }
-                walk(document);
-                return results;
-            """
-            inputs = self.ui.driver.execute_script(deep_search_js) or []
-            logger.info(f"Deep search found {len(inputs)} candidate file inputs")
-            for idx, candidate in enumerate(inputs):
-                try:
-                    acc = (candidate.get_attribute("accept") or "").lower()
-                    cls = candidate.get_attribute("class") or ""
-                    idv = candidate.get_attribute("id") or ""
-                    if ("image" in acc) or (not acc):
-                        self.ui.driver.execute_script(
-                            "arguments[0].style.cssText='display:block!important;visibility:visible!important;opacity:1!important;position:static!important;width:1px;height:1px';",
-                            candidate,
-                        )
-                        logger.info(
-                            f"Using shadow file input candidate idx={idx} "
-                            f"id='{idv}' class='{cls}' accept='{acc}'"
-                        )
-                        return candidate
-                except WebDriverException:
-                    logger.debug(f"Shadow file input candidate idx={idx} could not be used")
-                    continue
-        except WebDriverException as e:
-            logger.info(f"Deep shadow search failed: {e.msg}")
-        try:
-            logger.info("Scanning iframes for file input")
-            frames = self.ui.driver.find_elements(By.TAG_NAME, "iframe")
-            for i, frame in enumerate(frames):
-                try:
-                    self.ui.driver.switch_to.frame(frame)
-                    logger.info(f"Switched to iframe index {i}")
-                    for selector in MediaSelectors.IFRAME_INPUTS:
-                        try:
-                            by = By.CSS_SELECTOR if not selector.startswith("//") else By.XPATH
-                            fi = WebDriverWait(self.ui.driver, 2).until(
-                                EC.presence_of_element_located((by, selector))
-                            )
-                            self.ui.driver.execute_script(
-                                "arguments[0].style.cssText='display:block!important;visibility:visible!important;opacity:1!important;position:static!important;width:1px;height:1px';",
-                                fi,
-                            )
-                            logger.info(
-                                f"Found file input in iframe index {i} using selector {selector}"
-                            )
-                            return fi
-                        except WebDriverException:
-                            logger.debug(f"File input not found in iframe {i}: {selector}")
-                            continue
-                except WebDriverException as e:
-                    logger.debug(f"Error scanning iframe {i}: {e.msg}")
-                finally:
-                    try:
-                        self.ui.driver.switch_to.default_content()
-                    except WebDriverException:
-                        logger.debug("Could not switch back to the default frame")
-        except WebDriverException as e:
-            logger.info(f"Iframe scan failed: {e.msg}")
-        logger.info("Creating a new file input element as a last resort")
-        try:
-            create_input_js = (
-                """
-            const newInput = document.createElement('input');
-            newInput.type = 'file';
-            newInput.id = 'linkedin-bot-file-input';
-            newInput.style.cssText = 'position: fixed; top: 0; left: 0; """
-            "display: block !important; z-index: 9999;';\n"
-            """            document.body.appendChild(newInput);
-            return true;
-            """
-            )
-            self.ui.driver.execute_script(create_input_js)
-            try:
-                file_input = WebDriverWait(self.ui.driver, self.config.short_timeout).until(
-                    EC.presence_of_element_located((By.ID, "linkedin-bot-file-input"))
-                )
-                logger.info("Successfully created and found new file input element")
-                return file_input
-            except WebDriverException as e:
-                logger.error(f"Could not find created file input: {e.msg}")
-        except WebDriverException as e:
-            logger.error(f"Error creating new file input: {e.msg}")
-        logger.error("All attempts to find or create file input element failed")
+        selector_type = By.CSS_SELECTOR
+
+        result = self._find_by_selectors(modal, file_input_selectors, selector_type)
+        if result:
+            return result
+        result = self._find_file_input_by_label(modal)
+        if result:
+            return result
+        result = self._reveal_and_find_via_js(file_input_selectors)
+        if result:
+            return result
+        result = self._find_in_shadow_roots()
+        if result:
+            return result
+        result = self._find_in_iframes()
+        if result:
+            return result
+        result = self._create_new_file_input()
+        if result:
+            return result
+
+        logger.error("All methods to find/create file input exhausted.")
         return None
 
     def _handle_post_upload_buttons(self) -> bool:
