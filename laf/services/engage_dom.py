@@ -14,7 +14,7 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
@@ -799,6 +799,253 @@ class EngageDomService:
         except WebDriverException:
             return False
 
+    def _open_comment_editor(self, bar) -> tuple[Optional[Any], Optional[Any]]:
+        """Open the comment editor from a post action bar.
+
+        WHY
+          Keep the editor opening logic out of comment_from_bar so it stays
+          under the 60-line ceiling.
+
+        Args
+          bar: WebElement, the post action bar.
+
+        Returns
+          tuple[Optional[Any], Optional[Any]], the editor element and the
+          post root, or (None, None) when the editor cannot be found.
+        """
+        opened = False
+        for sel in EngageSelectors.COMMENT_BUTTONS:
+            try:
+                btn = bar.find_element(By.XPATH, sel)
+                if btn and btn.is_displayed():
+                    if self.ui.click_with_fallback(btn, "Comment (stream)"):
+                        opened = True
+                        break
+            except WebDriverException:
+                continue
+        if not opened:
+            return None, None
+
+        root = None
+        try:
+            root = self.find_post_root_for_bar(bar)
+        except WebDriverException:
+            root = None
+        search_context = root if root is not None else bar
+        editor = None
+        for xp in EngageSelectors.COMMENT_EDITOR:
+            try:
+                editor = WebDriverWait(search_context, 4).until(
+                    EC.presence_of_element_located((By.XPATH, xp))
+                )
+                if editor and editor.is_displayed():
+                    break
+            except WebDriverException:
+                continue
+        if not editor:
+            return None, None
+
+        self.ui.click_with_fallback(editor, "comment editor (stream)")
+        return editor, root
+
+    def _resolve_comment_author(self, bar, root, author_name, mention_author):
+        """Return the post author name, or None when not needed or not found.
+
+        WHY
+          Keep the author resolution out of comment_from_bar so it stays
+          under the 60-line ceiling.
+
+        Args
+          bar: WebElement, the post action bar.
+          root: Optional[WebElement], the post root element.
+          author_name: Optional[str], an already known name.
+          mention_author: bool, whether the caller wants a mention at all.
+
+        Returns
+          Optional[str], the author name or None.
+        """
+        if not mention_author:
+            return None
+        if author_name:
+            return author_name
+        try:
+            current_root = root
+            if current_root is None:
+                current_root = self.find_post_root_for_bar(bar)
+            return self.extract_author_name(current_root) if current_root else None
+        except WebDriverException:
+            return None
+
+    def _type_comment_text(self, editor, base_text: str) -> bool:
+        """Type or insert comment text into the editor.
+
+        WHY
+          Keep the editor typing logic out of comment_from_bar so it stays
+          under the 60-line ceiling.
+
+        Args
+          editor: WebElement, the comment editor.
+          base_text: str, the comment content to insert.
+
+        Returns
+          bool, True when the text was typed or inserted.
+        """
+        if self.mentions.post_text_contains_inline_mentions(base_text):
+            logger.info(f"Composing text with inline mentions: {base_text[:50]}...")
+            return self.mentions.compose_text_with_mentions(editor, base_text)
+
+        safe_text = self.mentions.sanitize_bmp(base_text)
+        try:
+            try:
+                self.ui.driver.execute_script("arguments[0].focus();", editor)
+                self.ui.pause(0.1, 0.3)
+            except WebDriverException:
+                pass
+            logger.info(f"Typing base comment text: {safe_text[:50]}...")
+            editor.send_keys(safe_text)
+        except WebDriverException:
+            try:
+                cleaned = base_text.replace("\n", "<br>")
+                self.ui.driver.execute_script(
+                    """
+                    const editor = arguments[0];
+                    const html = arguments[1];
+                    editor.focus();
+                    editor.insertAdjacentHTML('beforeend', html);
+                    editor.dispatchEvent(new Event('input', { bubbles: true }));
+                """,
+                    editor,
+                    cleaned,
+                )
+                logger.info("Appended comment text via JavaScript fallback.")
+            except WebDriverException:
+                return False
+        return True
+
+    def _insert_append_mention(self, editor, author, mention_author, mention_position) -> None:
+        """Add an author mention at the end of the comment text if requested.
+
+        WHY
+          Keep the append-mention logic out of comment_from_bar so it stays
+          under the 60-line ceiling.
+
+        Args
+          editor: WebElement, the comment editor.
+          author: Optional[str], the author name.
+          mention_author: bool, whether to add the mention.
+          mention_position: str, "prepend" or "append".
+
+        MUTATIONS
+          Types text into the editor.
+        """
+        if not (mention_author and author and (mention_position or "append") == "append"):
+            return
+        logger.info("COMMENT_ORDER mention=append")
+        try:
+            try:
+                self.ui.caret_to_end(editor)
+            except WebDriverException:
+                pass
+            try:
+                editor.send_keys(" ")
+            except WebDriverException:
+                pass
+            self.mentions.insert_mentions(
+                editor, [author], leading_space=True, force_end=True
+            )
+            try:
+                editor.send_keys(" ")
+            except WebDriverException:
+                pass
+        except WebDriverException:
+            try:
+                editor.send_keys(f" @{author} ")
+            except WebDriverException:
+                pass
+        try:
+            verified = self.mentions.verify_mention_entity(editor, author, timeout=2)
+        except WebDriverException:
+            verified = False
+        if not verified:
+            logger.warning(
+                f"Mention for {author} was not verified as an entity, "
+                "but leaving it as typed text to prevent duplicates."
+            )
+
+    def _submit_comment(self, bar, editor) -> bool:
+        """Submit the comment and mark the post as commented.
+
+        WHY
+          Keep the submit logic out of comment_from_bar so it stays under
+          the 60-line ceiling.
+
+        Args
+          bar: WebElement, the post action bar.
+          editor: WebElement, the comment editor.
+
+        Returns
+          bool, True when the submit click succeeded.
+        """
+        for sel in EngageSelectors.SUBMIT_COMMENT:
+            try:
+                try:
+                    logger.info("DISMISS before_submit: global search/typeahead overlay")
+                    self.overlays.dismiss_global_search_overlay()
+                except WebDriverException:
+                    pass
+                post_btn = WebDriverWait(self.ui.driver, 4).until(
+                    EC.element_to_be_clickable((By.XPATH, sel))
+                )
+                try:
+                    self.scroll_into_view(post_btn)
+                except WebDriverException:
+                    pass
+                if self.ui.click_with_fallback(post_btn, "Submit comment (stream)"):
+                    self._mark_post_commented(bar, editor)
+                    return True
+            except WebDriverException:
+                continue
+        return False
+
+    def _mark_post_commented(self, bar, editor) -> None:
+        """Mark the post as commented and dismiss the editor.
+
+        WHY
+          Keep the post-comment cleanup out of the submit method so both
+          stay under the 60-line ceiling.
+
+        Args
+          bar: WebElement, the post action bar.
+          editor: WebElement, the comment editor.
+
+        MUTATIONS
+          Sets a data attribute on the post root and blurs the editor.
+        """
+        root = bar
+        try:
+            root = self.find_post_root_for_bar(bar)
+            if root is None:
+                root = bar
+            self.ui.driver.execute_script(
+                "arguments[0].setAttribute('data-li-bot-commented','1');", root
+            )
+        except WebDriverException:
+            pass
+        try:
+            ed = root.find_element(By.XPATH, ".//div[@contenteditable='true']")
+            try:
+                ed.send_keys(Keys.ESCAPE)
+            except WebDriverException:
+                pass
+            try:
+                self.ui.driver.execute_script(
+                    "arguments[0].blur && arguments[0].blur();", ed
+                )
+            except WebDriverException:
+                pass
+        except WebDriverException:
+            pass
+
     def comment_from_bar(
         self,
         bar,
@@ -828,55 +1075,12 @@ class EngageDomService:
         if not text:
             return False
         try:
-            opened = False
-            for sel in EngageSelectors.COMMENT_BUTTONS:
-                try:
-                    btn = bar.find_element(By.XPATH, sel)
-                    if btn and btn.is_displayed():
-                        if self.ui.click_with_fallback(btn, "Comment (stream)"):
-                            opened = True
-                            break
-                except WebDriverException:
-                    continue
-            if not opened:
-                return False
-
-            editor = None
-            root = None
-            try:
-                root = self.find_post_root_for_bar(bar)
-            except WebDriverException:
-                root = None
-            search_context = root if root is not None else bar
-            candidates = EngageSelectors.COMMENT_EDITOR
-            for xp in candidates:
-                try:
-                    editor = WebDriverWait(search_context, 4).until(
-                        EC.presence_of_element_located((By.XPATH, xp))
-                    )
-                    if editor and editor.is_displayed():
-                        break
-                except WebDriverException:
-                    continue
+            editor, root = self._open_comment_editor(bar)
             if not editor:
                 return False
 
-            self.ui.click_with_fallback(editor, "comment editor (stream)")
-
             base_text = text or ""
-            author = None
-            if mention_author:
-                author = author_name
-                if author is None:
-                    try:
-                        if root is None:
-                            root = self.find_post_root_for_bar(bar)
-                    except WebDriverException:
-                        root = None
-                    try:
-                        author = self.extract_author_name(root) if root is not None else None
-                    except WebDriverException:
-                        author = None
+            author = self._resolve_comment_author(bar, root, author_name, mention_author)
 
             if mention_author and author and (mention_position or "append") == "prepend":
                 logger.info("COMMENT_ORDER mention=prepend")
@@ -891,125 +1095,12 @@ class EngageDomService:
                 except WebDriverException as e:
                     logger.warning(f"Error during prepend mention insertion: {e.msg}")
 
-            if self.mentions.post_text_contains_inline_mentions(base_text):
-                logger.info(f"Composing text with inline mentions: {base_text[:50]}...")
-                if not self.mentions.compose_text_with_mentions(editor, base_text):
-                    return False
-            else:
-                # Sanitize text for ChromeDriver (remove non-BMP characters like emojis)
-                # to prevent "ChromeDriver only supports characters in the BMP" error.
-                safe_text = self.mentions.sanitize_bmp(base_text)
+            if not self._type_comment_text(editor, base_text):
+                return False
 
-                try:
-                    # Re-focus editor to ensure keys reach it after mention logic
-                    try:
-                        self.ui.driver.execute_script("arguments[0].focus();", editor)
-                        self.ui.pause(0.1, 0.3)
-                    except WebDriverException:
-                        pass
+            self._insert_append_mention(editor, author, mention_author, mention_position)
 
-                    logger.info(f"Typing base comment text: {safe_text[:50]}...")
-                    editor.send_keys(safe_text)
-                except WebDriverException as e:
-                    logger.warning(f"Standard send_keys failed for comment text: {e.msg}")
-                    try:
-                        # Use JS to APPEND the original text (including emojis)
-                        # instead of overwriting the entire innerHTML (which removes mentions).
-                        cleaned = base_text.replace("\n", "<br>")
-                        self.ui.driver.execute_script(
-                            """
-                            const editor = arguments[0];
-                            const html = arguments[1];
-                            editor.focus();
-                            // Attempt to insert at the end of the content
-                            editor.insertAdjacentHTML('beforeend', html);
-                            // Trigger input event so LinkedIn's editor detects the change
-                            editor.dispatchEvent(new Event('input', { bubbles: true }));
-                        """,
-                            editor,
-                            cleaned,
-                        )
-                        logger.info("Appended comment text via JavaScript fallback.")
-                    except WebDriverException as js_e:
-                        logger.error(f"Failed to append comment text via JS: {js_e}")
-                        return False
-
-            if mention_author and author and (mention_position or "append") == "append":
-                logger.info("COMMENT_ORDER mention=append")
-                try:
-                    try:
-                        self.ui.caret_to_end(editor)
-                    except WebDriverException:
-                        pass
-                    try:
-                        editor.send_keys(" ")
-                    except WebDriverException:
-                        pass
-                    self.mentions.insert_mentions(
-                        editor, [author], leading_space=True, force_end=True
-                    )
-                    try:
-                        editor.send_keys(" ")
-                    except WebDriverException:
-                        pass
-                except WebDriverException:
-                    try:
-                        editor.send_keys(f" @{author} ")
-                    except WebDriverException:
-                        pass
-                try:
-                    verified = self.mentions.verify_mention_entity(editor, author, timeout=2)
-                except WebDriverException:
-                    verified = False
-                if not verified:
-                    logger.warning(
-                        f"Mention for {author} was not verified as an entity, "
-                        "but leaving it as typed text to prevent duplicates."
-                    )
-
-            for sel in EngageSelectors.SUBMIT_COMMENT:
-                try:
-                    try:
-                        logger.info("DISMISS before_submit: global search/typeahead overlay")
-                        self.overlays.dismiss_global_search_overlay()
-                    except WebDriverException:
-                        pass
-                    post_btn = WebDriverWait(self.ui.driver, 4).until(
-                        EC.element_to_be_clickable((By.XPATH, sel))
-                    )
-                    try:
-                        self.scroll_into_view(post_btn)
-                    except WebDriverException:
-                        pass
-                    if self.ui.click_with_fallback(post_btn, "Submit comment (stream)"):
-                        try:
-                            root = self.find_post_root_for_bar(bar)
-                            if root is None:
-                                root = bar
-                            self.ui.driver.execute_script(
-                                "arguments[0].setAttribute('data-li-bot-commented','1');", root
-                            )
-                        except WebDriverException:
-                            pass
-                        try:
-                            editor = (root if root is not None else bar).find_element(
-                                By.XPATH, ".//div[@contenteditable='true']"
-                            )
-                            try:
-                                editor.send_keys(Keys.ESCAPE)
-                            except WebDriverException:
-                                pass
-                            try:
-                                self.ui.driver.execute_script(
-                                    "arguments[0].blur && arguments[0].blur();", editor
-                                )
-                            except WebDriverException:
-                                pass
-                        except WebDriverException:
-                            pass
-                        return True
-                except WebDriverException:
-                    continue
+            return self._submit_comment(bar, editor)
         except WebDriverException:
             return False
         return False
