@@ -9,5 +9,4 @@ laf/services/feed_actions.py::repost_first_post
 laf/services/login.py::login
 laf/services/media.py::_find_file_input
 laf/services/mentions.py::insert_mentions
-laf/services/mentions.py::_capture_typeahead_snapshot
 laf/services/overlays.py::dismiss_overlays

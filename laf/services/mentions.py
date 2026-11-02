@@ -10,7 +10,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
@@ -368,6 +368,73 @@ class MentionService:
             time.sleep(0.2)
         return False
 
+    def _find_typeahead_container(self) -> Optional[Any]:
+        """Locate the mention typeahead popover element.
+
+        WHY
+          Keep the container search out of the snapshot method so it stays
+          under the 60-line ceiling.
+
+        Returns
+          Optional[Any], the container element, or None.
+        """
+        for xp in MentionSelectors.TYPEAHEAD_CONTAINERS:
+            try:
+                el = self.ui.driver.find_element(By.XPATH, xp)
+                if el and el.is_displayed():
+                    return el
+            except WebDriverException:
+                continue
+        return None
+
+    def _write_typeahead_snapshots(
+        self,
+        capture_dir: Path,
+        base: str,
+        typed_text: Optional[str],
+        outer_html: str,
+        items: List[dict],
+    ) -> None:
+        """Write the typeahead HTML and JSON snapshot files.
+
+        WHY
+          Keep file I/O out of the snapshot method so the function stays
+          under the 60-line ceiling.
+
+        Args
+          capture_dir: Path, the directory to write into.
+          base: str, the base file name without extension.
+          typed_text: Optional[str], the typed name for JSON metadata.
+          outer_html: str, the container outer HTML.
+          items: List[dict], the parsed suggestion items.
+
+        MUTATIONS
+          Writes two files (HTML + JSON) into capture_dir.
+        """
+        html_path = capture_dir / f"{base}.html"
+        json_path = capture_dir / f"{base}.json"
+        try:
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(outer_html)
+        except OSError as e:
+            logger.debug(f"Failed writing HTML snapshot: {e}")
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "typed": typed_text,
+                        "captured_at": base.replace("typeahead_", ""),
+                        "container": "editor-typeahead-fetch or similar",
+                        "items": items,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+        except (OSError, TypeError, ValueError) as e:
+            logger.debug(f"Failed writing JSON snapshot: {e}")
+        logger.info(f"Saved typeahead snapshot to {html_path} and {json_path}")
+
     def _capture_typeahead_snapshot(self, typed_text: Optional[str] = None) -> None:
         """Save the current mention popover HTML and items to files.
 
@@ -386,16 +453,7 @@ class MentionService:
         try:
             capture_dir = Path(self.config.typeahead_capture_dir)
             capture_dir.mkdir(parents=True, exist_ok=True)
-            container_xpaths = MentionSelectors.TYPEAHEAD_CONTAINERS
-            container = None
-            for xp in container_xpaths:
-                try:
-                    el = self.ui.driver.find_element(By.XPATH, xp)
-                    if el and el.is_displayed():
-                        container = el
-                        break
-                except WebDriverException:
-                    continue
+            container = self._find_typeahead_container()
             if not container:
                 logger.debug("Typeahead capture: no container found")
                 return
@@ -430,29 +488,7 @@ class MentionService:
                 safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(typed_text))[:40]
                 if safe:
                     base += f"_{safe}"
-            html_path = capture_dir / f"{base}.html"
-            json_path = capture_dir / f"{base}.json"
-            try:
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write(outer_html)
-            except OSError as e:
-                logger.debug(f"Failed writing HTML snapshot: {e}")
-            try:
-                with open(json_path, "w", encoding="utf-8") as f:
-                    json.dump(
-                        {
-                            "typed": typed_text,
-                            "captured_at": ts,
-                            "container": "editor-typeahead-fetch or similar",
-                            "items": items,
-                        },
-                        f,
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-            except (OSError, TypeError, ValueError) as e:
-                logger.debug(f"Failed writing JSON snapshot: {e}")
-            logger.info(f"Saved typeahead snapshot to {html_path} and {json_path}")
+            self._write_typeahead_snapshots(capture_dir, base, typed_text, outer_html, items)
         except (OSError, WebDriverException) as e:
             logger.debug(f"Typeahead capture error: {e}")
 
