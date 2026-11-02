@@ -48,6 +48,39 @@ class MediaService:
         self.overlays = overlays
         self.config = ui.config
 
+    def _open_media_tray_for_upload(self) -> Optional[WebElement]:
+        """Open the media tray and return a usable file input element.
+
+        WHY
+          Keep the media tray opening and file input discovery out of the main
+          upload method so it stays under the 60-line ceiling.
+
+        Returns
+          Optional[WebElement], the file input, or None when the input cannot
+          be found after trying.
+        """
+        self.ui.pause()
+        self.overlays.dismiss_overlays(preserve_share_modal=True)
+        self.ui.pause()
+
+        media_button = self._find_photo_button()
+        if media_button:
+            if not self.ui.click_with_fallback(media_button, "Add media"):
+                logger.warning("Click on 'Add media' failed; will try to find input directly")
+            else:
+                self.ui.pause(1, 2)
+
+        file_input = self._find_file_input()
+        if not file_input:
+            if media_button:
+                self.ui.click_with_fallback(media_button, "Add media (retry)")
+                self.ui.pause(1, 2)
+            file_input = self._find_file_input()
+            if not file_input:
+                logger.error("Could not find file input element after opening media UI")
+                return None
+        return file_input
+
     def upload_images_to_post(self, image_paths: Iterable[str]) -> bool:
         """Send the given image files to the open composer.
 
@@ -81,29 +114,9 @@ class MediaService:
 
         try:
             logger.info(f"Uploading {len(image_paths)} images to LinkedIn post")
-            self.ui.pause()
-            self.overlays.dismiss_overlays(preserve_share_modal=True)
-            self.ui.pause()
-
-            # Proactively open the media tray first; many UIs only create the input after this.
-            media_button = self._find_photo_button()
-            if media_button:
-                if not self.ui.click_with_fallback(media_button, "Add media"):
-                    logger.warning("Click on 'Add media' failed; will try to find input directly")
-                else:
-                    self.ui.pause(1, 2)
-
-            # Now find a file input to avoid native OS picker
-            file_input = self._find_file_input()
+            file_input = self._open_media_tray_for_upload()
             if not file_input:
-                # Try clicking media button once more and re-scan
-                if media_button:
-                    self.ui.click_with_fallback(media_button, "Add media (retry)")
-                    self.ui.pause(1, 2)
-                file_input = self._find_file_input()
-                if not file_input:
-                    logger.error("Could not find file input element after opening media UI")
-                    return False
+                return False
             abs_image_paths = [str(Path(path).absolute()) for path in image_paths]
             image_paths_str = "\n".join(abs_image_paths)
             self.ui.pause()
