@@ -50,134 +50,126 @@ class OverlayService:
             open post modal must be left alone.
         """
         self.dismiss_global_search_overlay()
+        self._dismiss_chat_overlay()
+        self._dismiss_notification_toast()
 
-        # Chat overlay
+        if not preserve_share_modal:
+            self._dismiss_save_draft_dialog()
+            self._dismiss_unsaved_detour_dialog()
+            self._dismiss_modal_dialog()
+
+        self._dismiss_draft_modal()
+
+        if not preserve_share_modal:
+            self._dismiss_unexpected_overlay()
+            self._remove_modal_backdrops()
+
+    def _dismiss_chat_overlay(self) -> None:
+        """Close the chat bubble if it is open."""
         try:
-            chat_overlay_close_button = self.ui.driver.find_element(
-                By.XPATH, OverlaySelectors.CHAT_CLOSE_BUTTON
-            )
-            chat_overlay_close_button.click()
+            btn = self.ui.driver.find_element(By.XPATH, OverlaySelectors.CHAT_CLOSE_BUTTON)
+            btn.click()
             logger.info("Closed chat overlay.")
         except WebDriverException:
             logger.info("No chat overlay to close.")
 
-        # Notification toast
+    def _dismiss_notification_toast(self) -> None:
+        """Close the notification toast if it is showing."""
         try:
-            toast_close_button = self.ui.driver.find_element(
-                By.XPATH, OverlaySelectors.TOAST_CLOSE_BUTTON
-            )
-            toast_close_button.click()
+            btn = self.ui.driver.find_element(By.XPATH, OverlaySelectors.TOAST_CLOSE_BUTTON)
+            btn.click()
             logger.info("Closed notification toast.")
         except WebDriverException:
             logger.info("No notification toast to close.")
 
-        if not preserve_share_modal:
-            # Save draft dialog
-            try:
-                save_draft_dialog = self.ui.driver.find_element(
-                    By.XPATH, OverlaySelectors.SAVE_DRAFT_DIALOG
-                )
-                discard_button = save_draft_dialog.find_element(
-                    By.XPATH, OverlaySelectors.DIALOG_SECONDARY_BUTTON
-                )
-                discard_button.click()
-                logger.info("Dismissed save draft dialog.")
-                self.ui.pause(1, 2)
-            except WebDriverException:
-                logger.info("No save draft dialog to dismiss.")
-
-            # Unsaved detour dialog
-            try:
-                unsaved_dialog = self.ui.driver.find_element(
-                    By.XPATH, OverlaySelectors.UNSAVED_DETOUR_DIALOG
-                )
-                dismiss_button = unsaved_dialog.find_element(
-                    By.XPATH, OverlaySelectors.DIALOG_SECONDARY_BUTTON
-                )
-                dismiss_button.click()
-                logger.info("Dismissed unsaved detour dialog.")
-                self.ui.pause(1, 2)
-            except WebDriverException:
-                logger.info("No unsaved detour dialog to dismiss.")
-
-        # Generic modal dismiss (avoid composer)
-        if not preserve_share_modal:
-            try:
-                modal_close_button = self.ui.driver.find_element(
-                    By.XPATH, OverlaySelectors.MODAL_DISMISS_BUTTON
-                )
-                if modal_close_button.find_elements(
-                    By.XPATH, OverlaySelectors.SHARE_MODAL_ANCESTOR
-                ):
-                    logger.info("Detected share composer modal; preserving it.")
-                modal_close_button.click()
-                logger.info("Closed a modal dialog using dismiss button.")
-                self.ui.pause(1, 2)
-            except WebDriverException:
-                logger.info("No modal dialog dismiss button found or preserved.")
-
-        # Special handling for draft modal while composer is present
+    def _dismiss_save_draft_dialog(self) -> None:
+        """Discard the 'save draft' dialog if it is open."""
         try:
-            composer_present = False
-            for root in OverlaySelectors.COMPOSER_ROOTS:
-                try:
-                    self.ui.driver.find_element(By.XPATH, root)
-                    composer_present = True
-                    break
-                except WebDriverException:
-                    logger.debug(f"Composer root not found: {root}")
-                    continue
-            if composer_present:
-                try:
-                    draft_modal = self.ui.driver.find_element(
-                        By.XPATH, OverlaySelectors.DRAFT_MODAL
-                    )
-                    try:
-                        close_btn = draft_modal.find_element(
-                            By.XPATH, OverlaySelectors.DRAFT_MODAL_CLOSE_BUTTON
-                        )
-                        close_btn.click()
-                        logger.info("Closed 'Save as draft' modal to resume composing.")
-                        self.ui.pause(0.5, 1.0)
-                    except WebDriverException:
-                        logger.info(
-                            "Could not locate dismiss button on 'Save as draft' modal; "
-                            "leaving it alone."
-                        )
-                except WebDriverException:
-                    logger.debug("Draft modal not found while the composer is present")
+            dialog = self.ui.driver.find_element(By.XPATH, OverlaySelectors.SAVE_DRAFT_DIALOG)
+            discard = dialog.find_element(By.XPATH, OverlaySelectors.DIALOG_SECONDARY_BUTTON)
+            discard.click()
+            logger.info("Dismissed save draft dialog.")
+            self.ui.pause(1, 2)
         except WebDriverException:
-            logger.debug("Could not check for a draft modal")
+            logger.info("No save draft dialog to dismiss.")
 
-        # Unexpected overlay with close button
-        if not preserve_share_modal:
+    def _dismiss_unsaved_detour_dialog(self) -> None:
+        """Dismiss the unsaved changes detour dialog if present."""
+        try:
+            dialog = self.ui.driver.find_element(By.XPATH, OverlaySelectors.UNSAVED_DETOUR_DIALOG)
+            dismiss = dialog.find_element(By.XPATH, OverlaySelectors.DIALOG_SECONDARY_BUTTON)
+            dismiss.click()
+            logger.info("Dismissed unsaved detour dialog.")
+            self.ui.pause(1, 2)
+        except WebDriverException:
+            logger.info("No unsaved detour dialog to dismiss.")
+
+    def _dismiss_modal_dialog(self) -> None:
+        """Close a generic modal, preserving the share composer."""
+        try:
+            btn = self.ui.driver.find_element(By.XPATH, OverlaySelectors.MODAL_DISMISS_BUTTON)
+            if btn.find_elements(By.XPATH, OverlaySelectors.SHARE_MODAL_ANCESTOR):
+                logger.info("Detected share composer modal; preserving it.")
+            btn.click()
+            logger.info("Closed a modal dialog using dismiss button.")
+            self.ui.pause(1, 2)
+        except WebDriverException:
+            logger.info("No modal dialog dismiss button found or preserved.")
+
+    def _dismiss_draft_modal(self) -> None:
+        """Close the 'Save as draft' modal if the composer is open."""
+        composer_present = False
+        for root in OverlaySelectors.COMPOSER_ROOTS:
             try:
-                close_button = self.ui.driver.find_element(
-                    By.XPATH, OverlaySelectors.UNEXPECTED_CLOSE_BUTTON
-                )
-                close_button.click()
-                logger.info("Closed an unexpected overlay.")
-                self.ui.pause(1, 2)
+                self.ui.driver.find_element(By.XPATH, root)
+                composer_present = True
+                break
             except WebDriverException:
-                logger.info("No unexpected overlay to close.")
-
-        # Remove modal backdrops via JS, conservative
-        if not preserve_share_modal:
+                continue
+        if not composer_present:
+            return
+        try:
+            modal = self.ui.driver.find_element(By.XPATH, OverlaySelectors.DRAFT_MODAL)
             try:
-                self.ui.driver.execute_script(
-                    (
-                        """
-                    var backdrops = document.querySelectorAll("""
-                    "'.artdeco-modal-overlay, .artdeco-modal__overlay');\n"
-                    "                    backdrops.forEach(function(backdrop) { "
-                    "backdrop.remove(); });\n"
-                    """                    document.body.style.overflow = 'auto';
-                    """
-                    )
+                btn = modal.find_element(By.XPATH, OverlaySelectors.DRAFT_MODAL_CLOSE_BUTTON)
+                btn.click()
+                logger.info("Closed 'Save as draft' modal to resume composing.")
+                self.ui.pause(0.5, 1.0)
+            except WebDriverException:
+                logger.info(
+                    "Could not locate dismiss button on 'Save as draft' modal; "
+                    "leaving it alone."
                 )
-                logger.info("Attempted to remove modal backdrops with JavaScript.")
-            except WebDriverException as e:
-                logger.info(f"JavaScript modal removal unsuccessful: {e.msg}")
+        except WebDriverException:
+            logger.debug("Draft modal not found while the composer is present")
+
+    def _dismiss_unexpected_overlay(self) -> None:
+        """Close an unexpected overlay with a close button."""
+        try:
+            btn = self.ui.driver.find_element(By.XPATH, OverlaySelectors.UNEXPECTED_CLOSE_BUTTON)
+            btn.click()
+            logger.info("Closed an unexpected overlay.")
+            self.ui.pause(1, 2)
+        except WebDriverException:
+            logger.info("No unexpected overlay to close.")
+
+    def _remove_modal_backdrops(self) -> None:
+        """Remove modal backdrops via JavaScript."""
+        try:
+            self.ui.driver.execute_script(
+                (
+                    """
+                var backdrops = document.querySelectorAll("""
+                "'.artdeco-modal-overlay, .artdeco-modal__overlay');\n"
+                "                backdrops.forEach(function(backdrop) { "
+                "backdrop.remove(); });\n"
+                """                document.body.style.overflow = 'auto';
+                """
+                )
+            )
+            logger.info("Attempted to remove modal backdrops with JavaScript.")
+        except WebDriverException as e:
+            logger.info(f"JavaScript modal removal unsuccessful: {e.msg}")
 
     def dismiss_global_search_overlay(self):
         """Hide the global search typeahead when it covers the page.
