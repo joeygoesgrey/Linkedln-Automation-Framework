@@ -149,6 +149,35 @@ def _safe_bool(value: str | None, default: bool) -> bool:
     return value.lower() == "true"
 
 
+def _resolve_source(
+    env: Mapping[str, str] | None,
+    headless_override: bool | None,
+) -> tuple[Mapping[str, str], str, str, str, bool]:
+    """Return the env source plus project URL, pitch, tagline and headless flag.
+
+    WHY
+      Keep the project metadata logic out of the Config constructor so the
+      loading function stays under the 60-line ceiling.
+
+    Args
+      env: the caller's env override, or None.
+      headless_override: the caller's headless override, or None.
+
+    Returns
+      (source, project_url, project_pitch, project_tagline, headless).
+    """
+    source: Mapping[str, str] = os.environ if env is None else env
+    project_url = source.get("PROJECT_URL", _DEFAULT_PROJECT_URL)
+    project_pitch = source.get("PROJECT_PITCH", _DEFAULT_PROJECT_PITCH)
+    project_tagline = source.get(
+        "PROJECT_TAGLINE", f"{project_pitch} Grab the code: {project_url}"
+    )
+    headless = _safe_bool(source.get("HEADLESS"), True)
+    if headless_override is not None:
+        headless = headless_override
+    return source, project_url, project_pitch, project_tagline, headless
+
+
 def load_config(
     env: Mapping[str, str] | None = None,
     headless_override: bool | None = None,
@@ -170,18 +199,9 @@ def load_config(
       from os.getcwd() once, at this call.
     """
 
-    source: Mapping[str, str] = os.environ if env is None else env
-
-    project_url = source.get("PROJECT_URL", _DEFAULT_PROJECT_URL)
-    project_pitch = source.get("PROJECT_PITCH", _DEFAULT_PROJECT_PITCH)
-    project_tagline = source.get(
-        "PROJECT_TAGLINE", f"{project_pitch} Grab the code: {project_url}"
+    source, project_url, project_pitch, project_tagline, headless = _resolve_source(
+        env, headless_override
     )
-
-    headless = _safe_bool(source.get("HEADLESS"), True)
-    if headless_override is not None:
-        headless = headless_override
-
     log_directory = "logs"
 
     return Config(

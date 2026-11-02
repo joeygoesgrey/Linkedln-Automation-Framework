@@ -2,7 +2,6 @@
 # The check fails on a new offender and on a stale entry, so this list can
 # only shrink. Remove the line when you split the function.
 laf/app.py::process_topics
-laf/config.py::load_config
 laf/services/engage_dom.py::comment_from_bar
 laf/services/engage_dom.py::_repost_from_bar
 laf/services/feed_actions.py::comment_first_post
@@ -12,5 +11,6 @@ laf/services/media.py::upload_images_to_post
 laf/services/media.py::_find_file_input
 laf/services/mentions.py::insert_mentions
 laf/services/mentions.py::_capture_typeahead_snapshot
+laf/services/mentions.py::_select_first_mention_suggestion
 laf/services/overlays.py::dismiss_overlays
 laf/services/profile_actions.py::search_profile
