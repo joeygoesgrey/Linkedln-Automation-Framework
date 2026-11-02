@@ -75,3 +75,5 @@ logs/
 
 # Local v2 working plan, never committed
 docs/V2_PLAN.md
+AGENTS.md
+.html
