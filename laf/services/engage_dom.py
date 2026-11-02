@@ -1105,6 +1105,205 @@ class EngageDomService:
             return False
         return False
 
+    def _open_repost_dropdown(self, bar) -> bool:
+        """Find and click the repost button on a post action bar.
+
+        WHY
+          Keep the repost button discovery out of the parent method.
+
+        Args
+          bar: WebElement, the post action bar.
+
+        Returns
+          bool, True when the dropdown was opened.
+        """
+        for sel in FeedActionSelectors.REPOST_BUTTONS:
+            try:
+                btn = bar.find_element(By.XPATH, sel)
+                if btn and btn.is_displayed():
+                    return self.ui.click_with_fallback(btn, "Repost dropdown")
+            except WebDriverException:
+                continue
+        return False
+
+    def _select_repost_option(self, bar) -> bool:
+        """Select the 'Repost with your thoughts' dropdown option.
+
+        WHY
+          Keep the option scanning logic out of the parent method.
+
+        Args
+          bar: WebElement, the post action bar.
+
+        Returns
+          bool, True when the option was clicked.
+        """
+        self.ui.pause(0.4, 0.8)
+        containers = []
+        for xp in FeedActionSelectors.REPOST_DROPDOWN_CONTAINERS_SCOPED:
+            try:
+                c = WebDriverWait(bar, 2).until(EC.presence_of_element_located((By.XPATH, xp)))
+                if c and c.is_displayed():
+                    containers.append(c)
+            except WebDriverException:
+                continue
+        if not containers:
+            try:
+                c = WebDriverWait(self.ui.driver, 2).until(
+                    EC.presence_of_element_located(
+                        (By.XPATH, FeedActionSelectors.REPOST_DROPDOWN_CONTAINERS_GLOBAL)
+                    )
+                )
+                if c:
+                    containers.append(c)
+            except WebDriverException:
+                pass
+        for container in containers:
+            for ts in FeedActionSelectors.REPOST_OPTION_TAGS:
+                try:
+                    nodes = container.find_elements(By.XPATH, ts)
+                except WebDriverException:
+                    continue
+                for n in nodes:
+                    try:
+                        if not n.is_displayed():
+                            continue
+                        txt = (n.text or "").strip().lower()
+                        if any(cand in txt for cand in FeedActionSelectors.REPOST_CANDIDATE_TEXTS):
+                            if self.ui.click_with_fallback(n, "Repost with your thoughts"):
+                                self.ui.pause(0.6, 1.2)
+                                return True
+                    except WebDriverException:
+                        continue
+        return False
+
+    def _find_and_focus_repost_editor(self) -> Optional[Any]:
+        """Find the repost editor and click it.
+
+        WHY
+          Keep editor discovery out of the parent method.
+
+        Returns
+          Optional[Any], the editor element, or None.
+        """
+        for xp in FeedActionSelectors.REPOST_EDITOR:
+            try:
+                editor = WebDriverWait(self.ui.driver, 6).until(
+                    EC.presence_of_element_located((By.XPATH, xp))
+                )
+                if editor and editor.is_displayed():
+                    self.ui.click_with_fallback(editor, "repost editor focus")
+                    return editor
+            except WebDriverException:
+                continue
+        return None
+
+    def _type_repost_thoughts(self, editor, thoughts_text: str) -> bool:
+        """Type the repost commentary into the editor.
+
+        WHY
+          Keep the typing logic out of the parent method.
+
+        Args
+          editor: WebElement, the repost editor.
+          thoughts_text: str, the commentary to type.
+
+        Returns
+          bool, True when the text was typed or inserted.
+        """
+        safe_thoughts = self.mentions.sanitize_bmp(thoughts_text)
+        try:
+            editor.send_keys(safe_thoughts)
+        except WebDriverException:
+            try:
+                cleaned = thoughts_text.replace("\n", "<br>")
+                self.ui.driver.execute_script(
+                    """
+                    const editor = arguments[0];
+                    const html = arguments[1];
+                    editor.focus();
+                    editor.insertAdjacentHTML('beforeend', html);
+                    editor.dispatchEvent(new Event('input', { bubbles: true }));
+                """,
+                    editor,
+                    cleaned,
+                )
+            except WebDriverException:
+                return False
+        return True
+
+    def _insert_repost_mention(self, editor, bar, author_name, mention_author, mention_position):
+        """Insert an author mention into the repost editor.
+
+        WHY
+          Keep the mention insertion logic out of the parent method.
+
+        Args
+          editor: WebElement, the repost editor.
+          bar: WebElement, the post action bar.
+          author_name: Optional[str], an already-known author.
+          mention_author: bool, whether to add the mention.
+          mention_position: str, "prepend" or "append".
+
+        MUTATIONS
+          Types text into the editor.
+        """
+        if not mention_author:
+            return
+        author = author_name
+        if not author:
+            try:
+                root = self.find_post_root_for_bar(bar)
+                author = self.extract_author_name(root) if root else None
+            except WebDriverException:
+                pass
+        if not author:
+            return
+        if (mention_position or "append") == "prepend":
+            try:
+                self.ui.caret_to_start(editor)
+            except WebDriverException:
+                pass
+            self.mentions.insert_mentions(
+                editor, [author], leading_space=False, force_start=True
+            )
+        else:
+            try:
+                self.ui.caret_to_end(editor)
+            except WebDriverException:
+                pass
+            try:
+                editor.send_keys(" ")
+            except WebDriverException:
+                pass
+            self.mentions.insert_mentions(
+                editor, [author], leading_space=True, force_end=True
+            )
+        try:
+            editor.send_keys(" ")
+        except WebDriverException:
+            pass
+
+    def _submit_repost(self) -> bool:
+        """Click the submit button for the repost.
+
+        WHY
+          Keep the submit logic out of the parent method.
+
+        Returns
+          bool, True when the repost was submitted.
+        """
+        for sel in FeedActionSelectors.SUBMIT_REPOST:
+            try:
+                btn = WebDriverWait(self.ui.driver, 4).until(
+                    EC.element_to_be_clickable((By.XPATH, sel))
+                )
+                if self.ui.click_with_fallback(btn, "Submit repost"):
+                    return True
+            except WebDriverException:
+                continue
+        return False
+
     def _repost_from_bar(
         self,
         bar,
@@ -1135,161 +1334,22 @@ class EngageDomService:
             return False
 
         try:
-            repost_btn = None
-            for sel in FeedActionSelectors.REPOST_BUTTONS:
-                try:
-                    btn = bar.find_element(By.XPATH, sel)
-                    if btn and btn.is_displayed():
-                        repost_btn = btn
-                        break
-                except WebDriverException:
-                    continue
-            if not repost_btn:
+            if not self._open_repost_dropdown(bar):
                 return False
-            if not self.ui.click_with_fallback(repost_btn, "Repost dropdown"):
+
+            if not self._select_repost_option(bar):
                 return False
-            self.ui.pause(0.4, 0.8)
 
-            dropdown_containers = []
-            for xp in FeedActionSelectors.REPOST_DROPDOWN_CONTAINERS_SCOPED:
-                try:
-                    c = WebDriverWait(bar, 2).until(EC.presence_of_element_located((By.XPATH, xp)))
-                    if c and c.is_displayed():
-                        dropdown_containers.append(c)
-                except WebDriverException:
-                    continue
-            if not dropdown_containers:
-                try:
-                    c = WebDriverWait(self.ui.driver, 2).until(
-                        EC.presence_of_element_located(
-                            (By.XPATH, FeedActionSelectors.REPOST_DROPDOWN_CONTAINERS_GLOBAL)
-                        )
-                    )
-                    if c:
-                        dropdown_containers.append(c)
-                except WebDriverException:
-                    pass
-
-            text_candidates = FeedActionSelectors.REPOST_CANDIDATE_TEXTS
-
-            option = None
-            for container in dropdown_containers:
-                tag_sets = FeedActionSelectors.REPOST_OPTION_TAGS
-                for ts in tag_sets:
-                    try:
-                        nodes = container.find_elements(By.XPATH, ts)
-                    except WebDriverException:
-                        nodes = []
-                    for n in nodes:
-                        try:
-                            if not n.is_displayed():
-                                continue
-                            txt = (n.text or "").strip().lower()
-                            if not txt:
-                                continue
-                            for cand in text_candidates:
-                                if cand in txt:
-                                    option = n
-                                    break
-                            if option:
-                                break
-                        except WebDriverException:
-                            continue
-                    if option:
-                        break
-                if option:
-                    break
-
-            if not option:
-                return False
-            if not self.ui.click_with_fallback(option, "Repost with your thoughts"):
-                return False
-            self.ui.pause(0.6, 1.2)
-
-            editor = None
-            for xp in FeedActionSelectors.REPOST_EDITOR:
-                try:
-                    editor = WebDriverWait(self.ui.driver, 6).until(
-                        EC.presence_of_element_located((By.XPATH, xp))
-                    )
-                    if editor and editor.is_displayed():
-                        break
-                except WebDriverException:
-                    continue
+            editor = self._find_and_focus_repost_editor()
             if not editor:
                 return False
-            self.ui.click_with_fallback(editor, "repost editor focus")
 
-            # Sanitize for ChromeDriver BMP limitation
-            safe_thoughts = self.mentions.sanitize_bmp(thoughts_text)
+            if not self._type_repost_thoughts(editor, thoughts_text):
+                return False
 
-            try:
-                editor.send_keys(safe_thoughts)
-            except WebDriverException:
-                try:
-                    cleaned = thoughts_text.replace("\n", "<br>")
-                    self.ui.driver.execute_script(
-                        """
-                        const editor = arguments[0];
-                        const html = arguments[1];
-                        editor.focus();
-                        editor.insertAdjacentHTML('beforeend', html);
-                        editor.dispatchEvent(new Event('input', { bubbles: true }));
-                    """,
-                        editor,
-                        cleaned,
-                    )
-                except WebDriverException:
-                    return False
+            self._insert_repost_mention(editor, bar, author_name, mention_author, mention_position)
 
-            if mention_author:
-                author = author_name
-                if not author:
-                    try:
-                        root = self.find_post_root_for_bar(bar)
-                        author = self.extract_author_name(root) if root else None
-                    except WebDriverException:
-                        pass
-                if author:
-                    if (mention_position or "append") == "prepend":
-                        try:
-                            self.ui.caret_to_start(editor)
-                        except WebDriverException:
-                            pass
-                        self.mentions.insert_mentions(
-                            editor, [author], leading_space=False, force_start=True
-                        )
-                        try:
-                            editor.send_keys(" ")
-                        except WebDriverException:
-                            pass
-                    else:
-                        try:
-                            self.ui.caret_to_end(editor)
-                        except WebDriverException:
-                            pass
-                        try:
-                            editor.send_keys(" ")
-                        except WebDriverException:
-                            pass
-                        self.mentions.insert_mentions(
-                            editor, [author], leading_space=True, force_end=True
-                        )
-                        try:
-                            editor.send_keys(" ")
-                        except WebDriverException:
-                            pass
-
-            for sel in FeedActionSelectors.SUBMIT_REPOST:
-                try:
-                    post_btn = WebDriverWait(self.ui.driver, 4).until(
-                        EC.element_to_be_clickable((By.XPATH, sel))
-                    )
-                    if self.ui.click_with_fallback(post_btn, "Submit repost"):
-                        return True
-                except WebDriverException:
-                    continue
-            return False
+            return self._submit_repost()
 
         except WebDriverException:
             return False
