@@ -6,7 +6,6 @@ laf/services/engage_dom.py::comment_from_bar
 laf/services/engage_dom.py::_repost_from_bar
 laf/services/feed_actions.py::comment_first_post
 laf/services/feed_actions.py::repost_first_post
-laf/services/login.py::login
 laf/services/media.py::_find_file_input
 laf/services/mentions.py::insert_mentions
 laf/services/overlays.py::dismiss_overlays

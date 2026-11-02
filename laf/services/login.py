@@ -45,6 +45,105 @@ class LoginService:
         self.ui = ui
         self.config = config
 
+    def _is_already_logged_in(self) -> bool:
+        """Check whether the browser is already on the LinkedIn feed.
+
+        WHY
+          Keep the early-exit check out of the login method so the 60-line
+          ceiling is not spent on a one-liner.
+
+        Returns
+          bool, True when the feed URL is detected.
+        """
+        try:
+            return "feed" in (self.ui.driver.current_url or "").lower()
+        except WebDriverException:
+            return False
+
+    def _ensure_login_page(self) -> bool:
+        """Navigate to the LinkedIn login page through the sign-in link or directly.
+
+        WHY
+          Keep the page navigation out of the login method so it stays under
+          the 60-line ceiling.
+
+        Returns
+          bool, True when the driver is on the login page, False when the
+          username field cannot be found.
+        """
+        try:
+            sign_in_button = WebDriverWait(self.ui.driver, self.config.short_timeout).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, LoginSelectors.SIGN_IN_LINK))
+            )
+            sign_in_button.click()
+            logger.info("Clicked sign-in button")
+            self.ui.pause()
+        except (TimeoutException, WebDriverException):
+            logger.info("No sign-in button found, likely already on login page")
+
+        if not any(x in self.ui.driver.current_url.lower() for x in ["login", "signin"]):
+            logger.warning(f"Not on login page. Current URL: {self.ui.driver.current_url}")
+            self.ui.driver.get(self.config.linkedin_login_url)
+            self.ui.pause()
+        return True
+
+    def _fill_login_form(self) -> bool:
+        """Type credentials and click the sign-in button.
+
+        WHY
+          Keep the form-filling logic out of the login method so it stays
+          under the 60-line ceiling.
+
+        Returns
+          bool, True when the sign-in button was clicked, False when a
+          field or button is missing or credentials fail validation.
+        """
+        username_selectors = LoginSelectors.USERNAME_FIELDS
+        username_field = self.ui.find_by_selectors(
+            username_selectors, By.CSS_SELECTOR, timeout=self.config.element_timeout
+        )
+        if not username_field:
+            logger.error("Could not find username field")
+            return False
+
+        username = self.config.linkedin_username
+        password = self.config.linkedin_password
+
+        try:
+            validated = LoginModel(username=username or "", password=password or "")
+        except ValidationError as e:
+            logger.error(f"Credential validation failed: {e}")
+            return False
+
+        username = validated.username
+        password = validated.password
+
+        self.ui.pause(0.5, 1.5)
+        self.ui.type_with_delays(username_field, username)
+
+        password_selectors = LoginSelectors.PASSWORD_FIELDS
+        password_field = self.ui.find_by_selectors(
+            password_selectors, By.CSS_SELECTOR, timeout=self.config.element_timeout
+        )
+        if not password_field:
+            logger.error("Could not find password field")
+            return False
+
+        self.ui.pause(0.5, 1)
+        self.ui.type_with_delays(password_field, password)
+
+        sign_in_selectors = LoginSelectors.SUBMIT_BUTTONS
+        sign_in_btn = self.ui.find_by_selectors(
+            sign_in_selectors, By.CSS_SELECTOR, timeout=self.config.element_timeout
+        )
+        if not sign_in_btn:
+            logger.error("Could not find sign-in button")
+            return False
+        sign_in_btn.click()
+        logger.info("Clicked login button")
+        self.ui.pause(3, 5)
+        return True
+
     def login(self) -> bool:
         """Sign in with the configured credentials and report whether it worked.
 
@@ -62,73 +161,14 @@ class LoginService:
             logger.info("Navigating to LinkedIn login page")
             self.ui.pause(self.config.min_page_load_delay, self.config.max_page_load_delay)
 
-            try:
-                if "feed" in self.ui.driver.current_url.lower():
-                    logger.info("Already logged in to LinkedIn")
-                    return True
-            except WebDriverException:
-                pass
+            if self._is_already_logged_in():
+                logger.info("Already logged in to LinkedIn")
+                return True
 
-            try:
-                sign_in_button = WebDriverWait(self.ui.driver, self.config.short_timeout).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, LoginSelectors.SIGN_IN_LINK))
-                )
-                sign_in_button.click()
-                logger.info("Clicked sign-in button")
-                self.ui.pause()
-            except (TimeoutException, WebDriverException):
-                logger.info("No sign-in button found, likely already on login page")
+            self._ensure_login_page()
 
-            if not any(x in self.ui.driver.current_url.lower() for x in ["login", "signin"]):
-                logger.warning(f"Not on login page. Current URL: {self.ui.driver.current_url}")
-                self.ui.driver.get(self.config.linkedin_login_url)
-                self.ui.pause()
-
-            username_selectors = LoginSelectors.USERNAME_FIELDS
-            username_field = self.ui.find_by_selectors(
-                username_selectors, By.CSS_SELECTOR, timeout=self.config.element_timeout
-            )
-            if not username_field:
-                logger.error("Could not find username field")
+            if not self._fill_login_form():
                 return False
-
-            username = self.config.linkedin_username
-            password = self.config.linkedin_password
-
-            # Pydantic validation (Standard 3)
-            try:
-                validated = LoginModel(username=username or "", password=password or "")
-            except ValidationError as e:
-                logger.error(f"Credential validation failed: {e}")
-                return False
-
-            username = validated.username
-            password = validated.password
-
-            self.ui.pause(0.5, 1.5)
-            self.ui.type_with_delays(username_field, username)
-
-            password_selectors = LoginSelectors.PASSWORD_FIELDS
-            password_field = self.ui.find_by_selectors(
-                password_selectors, By.CSS_SELECTOR, timeout=self.config.element_timeout
-            )
-            if not password_field:
-                logger.error("Could not find password field")
-                return False
-
-            self.ui.pause(0.5, 1)
-            self.ui.type_with_delays(password_field, password)
-
-            sign_in_selectors = LoginSelectors.SUBMIT_BUTTONS
-            sign_in_btn = self.ui.find_by_selectors(
-                sign_in_selectors, By.CSS_SELECTOR, timeout=self.config.element_timeout
-            )
-            if not sign_in_btn:
-                logger.error("Could not find sign-in button")
-                return False
-            sign_in_btn.click()
-            logger.info("Clicked login button")
-            self.ui.pause(3, 5)
 
             try:
                 WebDriverWait(self.ui.driver, self.config.short_timeout).until(
