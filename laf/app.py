@@ -198,6 +198,109 @@ class LinkedInBot:
         """
         self.app = app
 
+    def _choose_topic(self, topic_file_path: Optional[str]) -> tuple[str, bool, List[str]]:
+        """Read topics from file or fall back to built-in defaults.
+
+        WHY
+          Keep the topic file I/O and default fallback out of process_topics
+          so it stays under the 60-line ceiling.
+
+        Args
+          topic_file_path: Optional[str], the path to the topics file, or None.
+
+        Returns
+          tuple[str, bool, List[str]], the chosen topic, whether a real file
+          was used, and the full list of topics (for history tracking).
+        """
+        topics: List[str] = []
+        topics_file_exists = False
+        if topic_file_path and Path(topic_file_path).exists():
+            topics_file_exists = True
+            with open(topic_file_path, "r") as f:
+                topics = [t.strip() for t in f.readlines() if t.strip()]
+        if topics:
+            chosen_topic = random.choice(topics)
+            logger.info(f"Found {len(topics)} topics. Selected: {chosen_topic}")
+        else:
+            default_topics = getattr(
+                self.app.content_generator,
+                "_default_posts",
+                {
+                    "leadership", "productivity", "technology", "networking",
+                    "remote work", "iot", "ai", "blockchain",
+                },
+            )
+            chosen_topic = random.choice(list(default_topics))
+            logger.info(f"No topics file found. Using built-in topic: {chosen_topic}")
+        return chosen_topic, topics_file_exists, topics
+
+    def _publish_and_engage(
+        self,
+        post_content: str,
+        images_to_post: List[str],
+        schedule_date: Optional[str],
+        schedule_time: Optional[str],
+        engage_with_feed: bool,
+        max_posts_to_engage: int,
+        perspectives: List[str],
+        results: Dict[str, Any],
+    ) -> tuple[bool, Dict[str, Any]]:
+        """Publish the post and optionally engage with feed posts.
+
+        WHY
+          Keep the post + engage flow out of process_topics so it stays
+          under the 60-line ceiling.
+
+        Args
+          post_content: str, the generated post text.
+          images_to_post: List[str], image paths for the post.
+          schedule_date: Optional[str], the schedule date.
+          schedule_time: Optional[str], the schedule time.
+          engage_with_feed: bool, whether to run engagement.
+          max_posts_to_engage: int, max feed posts to touch.
+          perspectives: List[str], comment perspectives.
+          results: Dict[str, Any], the results dict to update.
+
+        Returns
+          tuple[bool, Dict[str, Any]], whether the post was created and
+          the updated results.
+        """
+        post_success = True
+        try:
+            self.app.services.composer.post_to_linkedin(
+                post_content,
+                image_paths=images_to_post,
+                schedule_date=schedule_date,
+                schedule_time=schedule_time,
+            )
+        except LAFError as error:
+            message, hint = render(error)
+            logger.error("%s %s [%s]", message, hint, error.code)
+            post_success = False
+        results["post_created"] = post_success
+
+        if post_success and engage_with_feed:
+            logger.info("Post successful. Engaging with feed...")
+            try:
+                engagement_ok = self.app.services.engage.engage_stream(
+                    mode="comment",
+                    comment_text=json.dumps(
+                        {
+                            "perspectives": perspectives,
+                            "max_tokens": 150,
+                            "temperature": 0.7,
+                        }
+                    ),
+                    max_actions=max_posts_to_engage,
+                    include_promoted=False,
+                )
+                results["engagement"] = {"success": bool(engagement_ok)}
+            except (WebDriverException, LAFError) as e:
+                logger.error(f"Error engaging with feed: {e}")
+                results["engagement"] = {"success": False, "error": str(e)}
+
+        return post_success, results
+
     def process_topics(
         self,
         topic_file_path: Optional[str] = None,
@@ -266,34 +369,7 @@ class LinkedInBot:
         logger.info(f"Processing topics from {topic_file_path}")
 
         try:
-            topics: List[str] = []
-            topics_file_exists = False
-
-            if topic_file_path and Path(topic_file_path).exists():
-                topics_file_exists = True
-                with open(topic_file_path, "r") as f:
-                    topics = [t.strip() for t in f.readlines() if t.strip()]
-
-            if topics:
-                chosen_topic = random.choice(topics)
-                logger.info(f"Found {len(topics)} topics. Selected: {chosen_topic}")
-            else:
-                default_topics = getattr(
-                    self.app.content_generator,
-                    "_default_posts",
-                    {
-                        "leadership",
-                        "productivity",
-                        "technology",
-                        "networking",
-                        "remote work",
-                        "iot",
-                        "ai",
-                        "blockchain",
-                    },
-                )
-                chosen_topic = random.choice(list(default_topics))
-                logger.info(f"No topics file found. Using built-in topic: {chosen_topic}")
+            chosen_topic, topics_file_exists, topics = self._choose_topic(topic_file_path)
 
             post_content = self.app.content_generator.generate_post_content(chosen_topic)
 
@@ -309,39 +385,10 @@ class LinkedInBot:
                 images_to_post = self._select_images(image_directory)
 
             if self.app.services.login.login():
-                post_success = True
-                try:
-                    self.app.services.composer.post_to_linkedin(
-                        post_content,
-                        image_paths=images_to_post,
-                        schedule_date=schedule_date,
-                        schedule_time=schedule_time,
-                    )
-                except LAFError as error:
-                    message, hint = render(error)
-                    logger.error("%s %s [%s]", message, hint, error.code)
-                    post_success = False
-                results["post_created"] = post_success
-
-                if post_success and engage_with_feed:
-                    logger.info("Post successful. Engaging with feed...")
-                    try:
-                        engagement_ok = self.app.services.engage.engage_stream(
-                            mode="comment",
-                            comment_text=json.dumps(
-                                {
-                                    "perspectives": perspectives,
-                                    "max_tokens": 150,
-                                    "temperature": 0.7,
-                                }
-                            ),
-                            max_actions=max_posts_to_engage,
-                            include_promoted=False,
-                        )
-                        results["engagement"] = {"success": bool(engagement_ok)}
-                    except (WebDriverException, LAFError) as e:
-                        logger.error(f"Error engaging with feed: {e}")
-                        results["engagement"] = {"success": False, "error": str(e)}
+                post_success, results = self._publish_and_engage(
+                    post_content, images_to_post, schedule_date, schedule_time,
+                    engage_with_feed, max_posts_to_engage, perspectives, results,
+                )
 
                 if post_success and topics_file_exists and chosen_topic in topics:
                     self._update_topics_file(topic_file_path, topics, chosen_topic)

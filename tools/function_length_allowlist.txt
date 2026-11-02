@@ -1,7 +1,6 @@
 # Functions still over the 60 code line ceiling, waiting to be split.
 # The check fails on a new offender and on a stale entry, so this list can
 # only shrink. Remove the line when you split the function.
-laf/app.py::process_topics
 laf/services/engage_dom.py::comment_from_bar
 laf/services/engage_dom.py::_repost_from_bar
 laf/services/feed_actions.py::comment_first_post
