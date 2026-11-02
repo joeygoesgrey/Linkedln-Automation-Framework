@@ -289,6 +289,260 @@ class FeedService:
         self.ui.pause(0.8, 1.5)
         return posted
 
+    def _generate_repost_thoughts(
+        self, thoughts_text, comment_generator, bar
+    ) -> Optional[str]:
+        """Return repost thoughts, generating them via AI if needed.
+
+        WHY
+          Keep the thoughts generation logic out of repost_first_post.
+
+        Returns
+          Optional[str], the thoughts text, or None when none could be
+          obtained.
+        """
+        if thoughts_text and thoughts_text.strip():
+            return thoughts_text
+        if not comment_generator:
+            logger.error(
+                "repost_first_post requires non-empty thoughts_text "
+                "or a successful AI generation"
+            )
+            return None
+        try:
+            root = self.engage_dom.find_post_root_for_bar(bar)
+        except WebDriverException as e:
+            logger.error(f"Failed to find post root for repost: {e.msg}")
+            return None
+        try:
+            return comment_generator(root)
+        except (AiError, WebDriverException) as e:
+            logger.error(f"Failed to generate AI thoughts: {e}")
+            return None
+
+    def _open_and_select_repost_option(self, bar) -> bool:
+        """Open the repost dropdown and select 'Repost with your thoughts'.
+
+        WHY
+          Keep the dropdown + option selection out of repost_first_post.
+
+        Returns
+          bool, True when the option was clicked.
+        """
+        repost_btn = None
+        for sel in FeedActionSelectors.REPOST_BUTTONS:
+            try:
+                el = bar.find_element(By.XPATH, sel)
+                if el and el.is_displayed():
+                    repost_btn = el
+                    break
+            except WebDriverException:
+                continue
+        if not repost_btn:
+            logger.error("Repost button not found on first post")
+            return False
+        if not self.ui.click_with_fallback(repost_btn, "Repost dropdown"):
+            return False
+        self.ui.pause(0.4, 0.8)
+
+        containers = []
+        for xp in FeedActionSelectors.REPOST_DROPDOWN_CONTAINERS_SCOPED:
+            try:
+                c = WebDriverWait(bar, 2).until(EC.presence_of_element_located((By.XPATH, xp)))
+                if c and c.is_displayed():
+                    containers.append(c)
+            except WebDriverException:
+                continue
+        if not containers:
+            try:
+                c = WebDriverWait(self.ui.driver, 2).until(
+                    EC.presence_of_element_located(
+                        (By.XPATH, FeedActionSelectors.REPOST_DROPDOWN_CONTAINERS_GLOBAL)
+                    )
+                )
+                if c:
+                    containers.append(c)
+            except WebDriverException:
+                pass
+
+        option = self._scan_repost_dropdowns(containers)
+        if not option:
+            option = self._scan_repost_globally()
+        if not option:
+            logger.error("'Repost with thoughts' option not found")
+            return False
+        if not self.ui.click_with_fallback(option, "Repost with your thoughts"):
+            return False
+        self.ui.pause(0.6, 1.2)
+        return True
+
+    def _scan_repost_dropdowns(self, containers) -> Optional[Any]:
+        """Scan dropdown containers for a 'Repost with thoughts' option.
+
+        Returns
+          Optional[Any], the option element, or None.
+        """
+        text_candidates = FeedActionSelectors.REPOST_CANDIDATE_TEXTS
+        for container in containers:
+            for ts in FeedActionSelectors.REPOST_OPTION_TAGS:
+                try:
+                    nodes = container.find_elements(By.XPATH, ts)
+                except WebDriverException:
+                    continue
+                for n in nodes:
+                    try:
+                        if not n.is_displayed():
+                            continue
+                        txt = (n.text or "").strip().lower()
+                        if not txt:
+                            continue
+                        for cand in text_candidates:
+                            if cand in txt:
+                                try:
+                                    return n.find_element(
+                                        By.XPATH, FeedActionSelectors.REPOST_OPTION_ROW
+                                    )
+                                except WebDriverException:
+                                    return n
+                    except WebDriverException:
+                        continue
+        return None
+
+    def _scan_repost_globally(self) -> Optional[Any]:
+        """Search the whole page for a 'Repost with thoughts' option.
+
+        Returns
+          Optional[Any], the option element, or None.
+        """
+        for cand in FeedActionSelectors.REPOST_CANDIDATE_TEXTS:
+            xp = FeedActionSelectors.REPOST_GLOBAL_OPTION_XPATH_TEMPLATE.format(cand=cand)
+            try:
+                nodes = self.ui.driver.find_elements(By.XPATH, xp)
+                for n in nodes:
+                    try:
+                        if n.is_displayed():
+                            return n
+                    except WebDriverException:
+                        continue
+            except WebDriverException:
+                continue
+        return None
+
+    def _find_and_focus_editor(self) -> Optional[Any]:
+        """Find the repost editor and focus it.
+
+        Returns
+          Optional[Any], the editor element, or None.
+        """
+        for xp in FeedActionSelectors.REPOST_EDITOR:
+            try:
+                editor = WebDriverWait(self.ui.driver, 6).until(
+                    EC.presence_of_element_located((By.XPATH, xp))
+                )
+                if editor and editor.is_displayed():
+                    try:
+                        self.ui.click_with_fallback(editor, "repost editor focus")
+                    except WebDriverException:
+                        pass
+                    return editor
+            except WebDriverException:
+                continue
+        logger.error("Could not find repost thoughts editor")
+        return None
+
+    def _type_into_editor(self, editor, text: str) -> bool:
+        """Type text into an editor, with JS fallback.
+
+        Returns
+          bool, True when the text was typed or inserted.
+        """
+        try:
+            editor.send_keys(text)
+        except WebDriverException:
+            try:
+                cleaned = text.replace("\n", "<br>")
+                self.ui.driver.execute_script(
+                    "arguments[0].innerHTML = arguments[1];", editor, cleaned
+                )
+            except WebDriverException as e:
+                logger.error(f"Failed to type thoughts text: {e.msg}")
+                return False
+        return True
+
+    def _insert_author_mention(self, editor, bar, mention_author, mention_position) -> None:
+        """Insert an author mention into the editor.
+
+        MUTATIONS
+          Types text into the editor.
+        """
+        if not mention_author:
+            return
+        author = None
+        try:
+            root = self.engage_dom.find_post_root_for_bar(bar)
+            author = self.engage_dom.extract_author_name(root) if root else None
+        except WebDriverException:
+            pass
+        if not author:
+            return
+        try:
+            if (mention_position or "append") == "prepend":
+                try:
+                    self.ui.caret_to_start(editor)
+                except WebDriverException:
+                    pass
+                self.mentions.insert_mentions(
+                    editor, [author], leading_space=False, force_start=True
+                )
+                try:
+                    editor.send_keys(" ")
+                except WebDriverException:
+                    pass
+            else:
+                try:
+                    self.ui.caret_to_end(editor)
+                except WebDriverException:
+                    pass
+                try:
+                    editor.send_keys(" ")
+                except WebDriverException:
+                    pass
+                self.mentions.insert_mentions(
+                    editor, [author], leading_space=True, force_end=True
+                )
+                try:
+                    editor.send_keys(" ")
+                except WebDriverException:
+                    pass
+        except WebDriverException:
+            try:
+                if (mention_position or "append") == "prepend":
+                    editor.send_keys(f"@{author} ")
+                else:
+                    self.ui.caret_to_end(editor)
+                    editor.send_keys(f" @{author} ")
+            except WebDriverException:
+                pass
+
+    def _find_and_click_submit(self) -> bool:
+        """Find the Post/Share button and click it.
+
+        Returns
+          bool, True when the button was clicked.
+        """
+        for sel in FeedActionSelectors.SUBMIT_REPOST:
+            try:
+                btn = WebDriverWait(self.ui.driver, 6).until(
+                    EC.element_to_be_clickable((By.XPATH, sel))
+                )
+                if self.ui.click_with_fallback(btn, "Submit repost"):
+                    self.ui.pause(1.0, 1.8)
+                    return True
+            except WebDriverException:
+                continue
+        logger.error("Could not find Post/Share button for repost")
+        return False
+
     def repost_first_post(
         self,
         thoughts_text: Optional[str] = None,
@@ -322,238 +576,20 @@ class FeedService:
             logger.error("Could not find social action bar for first post (repost)")
             return False
 
-        if not thoughts_text or not thoughts_text.strip():
-            if comment_generator:
-                try:
-                    root = self.engage_dom.find_post_root_for_bar(bar)
-                except WebDriverException as e:
-                    logger.error(f"Failed to find post root for repost: {e.msg}")
-                else:
-                    try:
-                        thoughts_text = comment_generator(root)
-                    except (AiError, WebDriverException) as e:
-                        logger.error(f"Failed to generate AI thoughts: {e}")
-
-        if not thoughts_text or not thoughts_text.strip():
-            logger.error(
-                "repost_first_post requires non-empty thoughts_text or a successful AI generation"
-            )
+        thoughts_text = self._generate_repost_thoughts(thoughts_text, comment_generator, bar)
+        if not thoughts_text:
             return False
 
-        # Open the Repost dropdown
-        repost_btn = None
-        for sel in FeedActionSelectors.REPOST_BUTTONS:
-            try:
-                el = bar.find_element(By.XPATH, sel)
-                if el and el.is_displayed():
-                    repost_btn = el
-                    break
-            except WebDriverException:
-                continue
-        if not repost_btn:
-            logger.error("Repost button not found on first post")
+        if not self._open_and_select_repost_option(bar):
             return False
-        if not self.ui.click_with_fallback(repost_btn, "Repost dropdown"):
-            return False
-        self.ui.pause(0.4, 0.8)
 
-        # Choose 'Repost with your thoughts' (robust search)
-        option = None
-        # First, try to scope to a dropdown content element near the bar
-        dropdown_containers = []
-        for xp in FeedActionSelectors.REPOST_DROPDOWN_CONTAINERS_SCOPED:
-            try:
-                c = WebDriverWait(bar, 2).until(EC.presence_of_element_located((By.XPATH, xp)))
-                if c and c.is_displayed():
-                    dropdown_containers.append(c)
-            except WebDriverException:
-                continue
-        if not dropdown_containers:
-            # Global fallback (dropdown content may not be under bar)
-            try:
-                c = WebDriverWait(self.ui.driver, 2).until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, FeedActionSelectors.REPOST_DROPDOWN_CONTAINERS_GLOBAL)
-                    )
-                )
-                if c:
-                    dropdown_containers.append(c)
-            except WebDriverException:
-                pass
-
-        # Candidate text patterns (case-insensitive)
-        text_candidates = FeedActionSelectors.REPOST_CANDIDATE_TEXTS
-
-        def _find_option_in(container):
-            """Find the repost-with-thoughts option inside one dropdown.
-
-            WHY
-              The option sits under different tags per layout, so one scoped
-              search keeps the caller from repeating the tag loop.
-
-            Args
-              container: WebElement, the opened dropdown to inspect.
-
-            Returns
-              Optional[WebElement], the visible option whose text matches a known
-              label, or None when none matched.
-            """
-            # Try common clickable tags first
-            tag_sets = FeedActionSelectors.REPOST_OPTION_TAGS
-            for ts in tag_sets:
-                try:
-                    nodes = container.find_elements(By.XPATH, ts)
-                except WebDriverException:
-                    nodes = []
-                for n in nodes:
-                    try:
-                        if not n.is_displayed():
-                            continue
-                        txt = (n.text or "").strip().lower()
-                        if not txt:
-                            continue
-                        for cand in text_candidates:
-                            if cand in txt:
-                                try:
-                                    return n.find_element(
-                                        By.XPATH,
-                                        FeedActionSelectors.REPOST_OPTION_ROW,
-                                    )
-                                except WebDriverException:
-                                    return n
-                    except WebDriverException:
-                        continue
-            return None
-
-        for container in dropdown_containers:
-            option = _find_option_in(container)
-            if option:
-                break
-        if not option:
-            # Global catch-all search for any visible node with the text
-            try:
-                option = None
-                for cand in text_candidates:
-                    xp = FeedActionSelectors.REPOST_GLOBAL_OPTION_XPATH_TEMPLATE.format(cand=cand)
-                    nodes = self.ui.driver.find_elements(By.XPATH, xp)
-                    for n in nodes:
-                        try:
-                            if n.is_displayed():
-                                option = n
-                                break
-                        except WebDriverException:
-                            continue
-                    if option:
-                        break
-            except WebDriverException:
-                option = None
-        if not option:
-            logger.error("'Repost with thoughts' option not found")
-            return False
-        if not self.ui.click_with_fallback(option, "Repost with your thoughts"):
-            return False
-        self.ui.pause(0.6, 1.2)
-
-        # Find the repost editor
-        editor = None
-        editor_xpaths = FeedActionSelectors.REPOST_EDITOR
-        for xp in editor_xpaths:
-            try:
-                editor = WebDriverWait(self.ui.driver, 6).until(
-                    EC.presence_of_element_located((By.XPATH, xp))
-                )
-                if editor and editor.is_displayed():
-                    break
-            except WebDriverException:
-                continue
+        editor = self._find_and_focus_editor()
         if not editor:
-            logger.error("Could not find repost thoughts editor")
-            return False
-        try:
-            self.ui.click_with_fallback(editor, "repost editor focus")
-        except WebDriverException:
-            pass
-
-        # Compose base text
-        try:
-            editor.send_keys(thoughts_text)
-        except WebDriverException:
-            try:
-                cleaned = thoughts_text.replace("\n", "<br>")
-                self.ui.driver.execute_script(
-                    "arguments[0].innerHTML = arguments[1];", editor, cleaned
-                )
-            except WebDriverException as e:
-                logger.error(f"Failed to type thoughts text: {e.msg}")
-                return False
-
-        # Mention author appended by default (or prepend if specified)
-        if mention_author:
-            author = None
-            try:
-                root = self.engage_dom.find_post_root_for_bar(bar)
-                author = (
-                    self.engage_dom.extract_author_name(root) if root is not None else None
-                )
-            except WebDriverException:
-                author = None
-            if author:
-                try:
-                    if (mention_position or "append") == "prepend":
-                        # Move caret to start and insert
-                        try:
-                            self.ui.caret_to_start(editor)
-                        except WebDriverException:
-                            pass
-                        self.mentions.insert_mentions(
-                            editor, [author], leading_space=False, force_start=True
-                        )
-                        try:
-                            editor.send_keys(" ")
-                        except WebDriverException:
-                            pass
-                    else:
-                        # Append at end
-                        try:
-                            self.ui.caret_to_end(editor)
-                        except WebDriverException:
-                            pass
-                        try:
-                            editor.send_keys(" ")
-                        except WebDriverException:
-                            pass
-                        self.mentions.insert_mentions(
-                            editor, [author], leading_space=True, force_end=True
-                        )
-                        try:
-                            editor.send_keys(" ")
-                        except WebDriverException:
-                            pass
-                except WebDriverException:
-                    try:
-                        if (mention_position or "append") == "prepend":
-                            editor.send_keys(f"@{author} ")
-                        else:
-                            self.ui.caret_to_end(editor)
-                            editor.send_keys(f" @{author} ")
-                    except WebDriverException:
-                        pass
-
-        # Click Post/Share
-        post_btn = None
-        for sel in FeedActionSelectors.SUBMIT_REPOST:
-            try:
-                post_btn = WebDriverWait(self.ui.driver, 6).until(
-                    EC.element_to_be_clickable((By.XPATH, sel))
-                )
-                break
-            except WebDriverException:
-                continue
-        if not post_btn:
-            logger.error("Could not find Post/Share button for repost")
-            return False
-        if not self.ui.click_with_fallback(post_btn, "Submit repost"):
             return False
 
-        self.ui.pause(1.0, 1.8)
-        return True
+        if not self._type_into_editor(editor, thoughts_text):
+            return False
+
+        self._insert_author_mention(editor, bar, mention_author, mention_position)
+
+        return self._find_and_click_submit()
