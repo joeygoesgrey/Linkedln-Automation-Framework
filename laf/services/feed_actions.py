@@ -147,6 +147,57 @@ class FeedService:
         self.ui.pause(0.5, 1.0)
         return True
 
+    def _open_comment_editor_for_first_post(self) -> tuple[Optional[Any], Optional[Any]]:
+        """Open the comment box on the first feed post.
+
+        WHY
+          Keep the action bar and editor discovery out of comment_first_post
+          so it stays under the 60-line ceiling.
+
+        Returns
+          tuple[Optional[Any], Optional[Any]], (editor, bar) or (None, None).
+        """
+        bar = self._first_action_bar()
+        if not bar:
+            logger.error("Could not find social action bar for first post")
+            return None, None
+
+        comment_btn = None
+        for sel in FeedActionSelectors.COMMENT_BUTTONS:
+            try:
+                el = bar.find_element(By.XPATH, sel)
+                if el and el.is_displayed():
+                    comment_btn = el
+                    break
+            except WebDriverException:
+                continue
+        if not comment_btn:
+            logger.error("Comment button not found on first post")
+            return None, None
+        self.ui.click_with_fallback(comment_btn, "Comment (first post)")
+        self.ui.pause(0.5, 1.0)
+
+        editor = None
+        for xp in FeedActionSelectors.COMMENT_EDITOR:
+            try:
+                editor = WebDriverWait(self.ui.driver, self.config.element_timeout).until(
+                    EC.presence_of_element_located((By.XPATH, xp))
+                )
+                if editor and editor.is_displayed():
+                    break
+            except WebDriverException:
+                editor = None
+                continue
+        if not editor:
+            logger.error("Could not find comment editor for first post")
+            return None, None
+
+        try:
+            self.ui.click_with_fallback(editor, "comment editor")
+        except WebDriverException:
+            pass
+        return editor, bar
+
     def comment_first_post(
         self, text, mention_author: bool = False, mention_position: str = "append"
     ):
@@ -173,49 +224,9 @@ class FeedService:
             return False
 
         self._goto_feed()
-        bar = self._first_action_bar()
-        if not bar:
-            logger.error("Could not find social action bar for first post")
-            return False
-
-        # Open the comment box
-        comment_btn_selectors = FeedActionSelectors.COMMENT_BUTTONS
-        comment_btn = None
-        for sel in comment_btn_selectors:
-            try:
-                el = bar.find_element(By.XPATH, sel)
-                if el and el.is_displayed():
-                    comment_btn = el
-                    break
-            except WebDriverException:
-                continue
-        if not comment_btn:
-            logger.error("Comment button not found on first post")
-            return False
-        self.ui.click_with_fallback(comment_btn, "Comment (first post)")
-        self.ui.pause(0.5, 1.0)
-
-        # Find the inline comment editor near the first post
-        editor_selectors = FeedActionSelectors.COMMENT_EDITOR
-        editor = None
-        for xp in editor_selectors:
-            try:
-                editor = WebDriverWait(self.ui.driver, self.config.element_timeout).until(
-                    EC.presence_of_element_located((By.XPATH, xp))
-                )
-                if editor and editor.is_displayed():
-                    break
-            except WebDriverException:
-                editor = None
-                continue
+        editor, bar = self._open_comment_editor_for_first_post()
         if not editor:
-            logger.error("Could not find comment editor for first post")
             return False
-
-        try:
-            self.ui.click_with_fallback(editor, "comment editor")
-        except WebDriverException:
-            pass
 
         # If requested, append/prepend the author's mention token
         if mention_author:
