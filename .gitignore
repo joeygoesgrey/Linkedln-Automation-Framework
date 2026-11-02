@@ -63,6 +63,7 @@ venv/
 
 linkedlnbot.sh
 *.txt
+!tools/function_length_allowlist.txt
 systemprompt.md
 
 chrome_profile/
@@ -71,3 +72,6 @@ test_images/
 .agents/
 
 logs/
+
+# Local v2 working plan, never committed
+docs/V2_PLAN.md

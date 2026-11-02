@@ -13,26 +13,34 @@ Be respectful, inclusive, and professional in all community spaces.
 1. Search existing issues before opening a new one.
 2. When reporting a bug, include:
    - what you ran (`python main.py ...`)
-   - log snippets from `logs/linkedin_bot_<timestamp>.log`
+   - log snippets from `logs/laf_<timestamp>.log`
    - screenshots or DOM snippets if selectors failed
    - platform details (OS, Python version, Chrome/Chromium version)
 
 ## 3. Proposals & Feature Requests
 
 Open an issue describing the problem you want to solve. It helps to outline:
-- the use case or workflow you’re addressing
+- the use case or workflow you are addressing
 - suggested CLI flags or configuration changes
 - any prior art or related PRs/issues
 
 ## 4. Development Setup
 
 ```bash
-pip install -r requirements.txt
+uv sync
 cp .env.example .env   # create your own secrets
-python main.py --help
+uv run python main.py --help
 ```
 
-Recommended flags for debugging: `--debug --headless=false --max-actions 3`.
+Recommended flags for debugging: `--debug --headless`.
+
+Run the checks before you open a pull request:
+
+```bash
+uv run ruff check laf/ main.py tests/ tools/
+uv run pytest -q
+uv run pyright laf/ main.py
+```
 
 ## 5. Making Changes
 
@@ -52,7 +60,7 @@ docs: expand README install section
 
 ## 7. Pull Request Checklist
 
-- [ ] Code compiles (`python -m compileall linkedin_ui`)
+- [ ] The checks above pass
 - [ ] Tests or manual verification performed (describe in PR)
 - [ ] README / docs updated when applicable
 - [ ] No secrets or credentials committed
@@ -61,8 +69,7 @@ docs: expand README install section
 ## 8. Licensing
 
 By submitting a contribution, you agree it will be licensed under the
-[LinkedIn Bot Community License](LICENSE.md). Commercial use requires a
-separate agreement with the original author.
+[MIT License](LICENSE.md).
 
 ## 9. Need Help?
 

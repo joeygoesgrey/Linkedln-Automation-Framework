@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "laf"
+version = "2.0.0"
+description = "LinkedIn automation bot for posting content and engaging with the feed."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Joseph Edomobi" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "selenium>=4.20,<5",
+    "webdriver-manager>=4,<5",
+    "openai>=1.30,<2",
+    "python-dotenv>=1.0,<2",
+    "pydantic>=2.7,<3",
+    "sumy>=0.11,<1",
+]
+
+[project.optional-dependencies]
+stealth = [
+    "undetected-chromedriver>=3.5,<4",
+    "setuptools>=68",
+]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.6,<1",
+    "pyright>=1.1,<2",
+    "beautifulsoup4>=4.12,<5",
+]
+
+[tool.setuptools.packages.find]
+include = ["laf*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "D100"]
+
+[tool.pyright]
+include = ["laf"]
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Pre-commit hook: run ruff, then the function length checker.
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if ! uv run ruff check laf/ main.py tests/ tools/; then
+    echo "commit blocked: ruff found problems, see the lines above"
+    exit 1
+fi
+
+if ! uv run python tools/check_function_length.py; then
+    echo "commit blocked: a function is over the line ceiling."
+    echo "see details with: uv run python tools/check_function_length.py --list"
+    exit 1
+fi
